@@ -129,6 +129,16 @@ def parse_detail(html: str) -> dict:
     contact_el = soup.select_one(".news-event--details__group--contact .news-event--details__group-text")
     contact = contact_el.get_text(strip=True) if contact_el else ""
 
+    # Body HTML from page (has real hrefs, unlike JSON-LD which strips them)
+    body_el = soup.select_one(".news-event--body")
+    body_html = ""
+    if body_el:
+        # Make relative links absolute
+        for a in body_el.find_all("a", href=True):
+            if a["href"].startswith("/"):
+                a["href"] = BASE_URL + a["href"]
+        body_html = str(body_el.decode_contents())
+
     # Parse startDate — keep timezone for UTC conversion
     start_iso = ld.get("startDate", "")
     start_dt_utc = None
@@ -143,7 +153,7 @@ def parse_detail(html: str) -> dict:
     return {
         "title": ld.get("name", ""),
         "about": ld.get("about", ""),
-        "description": ld.get("description", ""),
+        "description": body_html or ld.get("description", ""),
         "start_iso": start_iso,
         "start_dt": start_dt_utc,
         "location": (ld.get("location") or {}).get("name", ""),
@@ -285,7 +295,13 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
     location = ev.get("location", "")
     # Plain-text description
     desc_html = ev.get("description") or ev.get("about") or ""
-    desc = html_mod.unescape(re.sub(r'<[^>]+>', '', desc_html)).strip()
+    _d = re.sub(r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                lambda m: f'{m.group(2)} ({m.group(1)})', desc_html, flags=re.IGNORECASE | re.DOTALL)
+    _d = re.sub(r'<(?:em|i)>(.*?)</(?:em|i)>', r'_\1_', _d, flags=re.IGNORECASE | re.DOTALL)
+    _d = re.sub(r'<br\s*/?>', '\n', _d, flags=re.IGNORECASE)
+    _d = re.sub(r'</p>', '\n\n', _d, flags=re.IGNORECASE)
+    _d = re.sub(r'<[^>]+>', '', _d)
+    desc = html_mod.unescape(_d).strip()
     if ev.get("url"):
         desc = (desc + "\n\n" if desc else "") + ev["url"]
 
@@ -298,7 +314,7 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
     if location:
         params["location"] = location
     if desc:
-        params["details"] = desc[:1500]  # GCal URL limit
+        params["details"] = desc
     return "https://calendar.google.com/calendar/render?" + urlencode(params)
 
 
@@ -306,75 +322,7 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
 # ICS generation
 # ---------------------------------------------------------------------------
 
-def ics_escape(s: str) -> str:
-    """Escape special characters for ICS text values."""
-    s = s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
-    s = s.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
-    return s
-
-
-def ics_fold(line: str) -> str:
-    """Fold long ICS lines at 75 characters (close enough to RFC 5545)."""
-    if len(line) <= 75:
-        return line + "\r\n"
-    result = []
-    while len(line) > 75:
-        result.append(line[:75])
-        line = " " + line[75:]
-    result.append(line)
-    return "\r\n".join(result) + "\r\n"
-
-
-def generate_ics(events: list[dict], start: date, end: date) -> str:
-    """Generate a single VCALENDAR ICS string with one VEVENT per occurrence."""
-    lines = [
-        "BEGIN:VCALENDAR\r\n",
-        "VERSION:2.0\r\n",
-        "PRODID:-//Dartmouth Events Scraper//EN\r\n",
-        "CALSCALE:GREGORIAN\r\n",
-        f"X-WR-CALNAME:Dartmouth Events {start.isoformat()} to {end.isoformat()}\r\n",
-        "X-WR-TIMEZONE:America/New_York\r\n",
-    ]
-
-    for ev in events:
-        dates = ev.get("dates") or []
-        title = ev.get("title", "Untitled")
-        location = ev.get("location", "")
-        desc_html = ev.get("description") or ev.get("about") or ev.get("summary") or ""
-        desc_plain = html_mod.unescape(re.sub(r'<[^>]+>', '', desc_html)).strip()
-        if ev.get("url"):
-            desc_plain = (desc_plain + "\n\n" if desc_plain else "") + ev["url"]
-        url = ev.get("url", "")
-        event_id = ev.get("id", "unknown")
-
-        for occ_date in dates:
-            start_utc, end_utc, is_all_day = event_datetimes(ev, occ_date)
-            uid = f"dartmouth-{event_id}-{occ_date.isoformat()}@home.dartmouth.edu"
-
-            lines.append("BEGIN:VEVENT\r\n")
-            lines.append(ics_fold(f"UID:{uid}"))
-            lines.append(ics_fold(f"SUMMARY:{ics_escape(title)}"))
-
-            if is_all_day:
-                lines.append(ics_fold(f"DTSTART;VALUE=DATE:{start_utc.strftime('%Y%m%d')}"))
-                lines.append(ics_fold(f"DTEND;VALUE=DATE:{end_utc.strftime('%Y%m%d')}"))
-            else:
-                lines.append(ics_fold(f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}"))
-                lines.append(ics_fold(f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}"))
-
-            if location:
-                lines.append(ics_fold(f"LOCATION:{ics_escape(location)}"))
-            if desc_plain:
-                lines.append(ics_fold(f"DESCRIPTION:{ics_escape(desc_plain)}"))
-            if url:
-                lines.append(ics_fold(f"URL:{url}"))
-            lines.append("END:VEVENT\r\n")
-
-    lines.append("END:VCALENDAR\r\n")
-    return "".join(lines)
-
-
-def generate_html(events: list[dict], start: date, end: date, ics_filename: str = "") -> str:
+def generate_html(events: list[dict], start: date, end: date) -> str:
     """Generate the full self-contained HTML page."""
 
     # Group events by first date
@@ -542,7 +490,7 @@ def generate_html(events: list[dict], start: date, end: date, ics_filename: str 
       gap: 0.6rem;
       flex-wrap: wrap;
       list-style: none;
-      user-select: none;
+      user-select: text;
     }
     summary::-webkit-details-marker { display: none; }
     summary::before {
@@ -640,21 +588,6 @@ def generate_html(events: list[dict], start: date, end: date, ics_filename: str 
       white-space: nowrap;
     }
     .gcal-btn:hover { background: #3367d6; }
-    .ics-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      font-size: 0.85rem;
-      font-weight: 500;
-      color: #00693e;
-      text-decoration: none;
-      padding: 0.3rem 0.7rem;
-      border: 1px solid #00693e;
-      border-radius: 5px;
-      margin-top: 0.5rem;
-    }
-    .ics-link:hover { background: #e8f4ee; }
-
     @media (max-width: 600px) {
       .ev-image { float: none; max-width: 100%; margin: 0 0 0.5rem; }
       summary { flex-direction: column; gap: 0.2rem; }
@@ -666,6 +599,7 @@ def generate_html(events: list[dict], start: date, end: date, ics_filename: str 
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <link rel="icon" href="https://home.dartmouth.edu/themes/custom/darthome_2021/favicon.ico">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dartmouth Events – {start.strftime("%b %-d")} to {end.strftime("%b %-d, %Y")}</title>
   <style>{css}</style>
@@ -673,7 +607,6 @@ def generate_html(events: list[dict], start: date, end: date, ics_filename: str 
 <body>
   <h1>Dartmouth Events</h1>
   <p class="subtitle">Scraped from <a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a></p>
-  {f'<a class="ics-link" href="{ics_filename}" download>📅 Download all events (.ics for Google/Apple Calendar)</a>' if ics_filename else ''}
   <div class="stats">
     Showing <strong>{total}</strong> events ({important_count} open, {total - important_count} collapsed)
     from <strong>{start.strftime("%B %-d")}</strong> to <strong>{end.strftime("%B %-d, %Y")}</strong>.
@@ -760,18 +693,12 @@ def main():
     unimportant_count = sum(1 for e in merged_events if e["unimportant"])
     print(f"Important: {len(merged_events) - unimportant_count}, Unimportant: {unimportant_count}")
 
-    # Step 7: Generate ICS
+    # Step 7: Generate HTML into output/
+    import os
+    os.makedirs("output", exist_ok=True)
     stem = f"events_{today.isoformat()}_to_{end.isoformat()}"
-    ics_path = f"{stem}.ics"
-    ics_output = generate_ics(merged_events, today, end)
-    with open(ics_path, "w", encoding="utf-8", newline="") as f:
-        f.write(ics_output)
-    ics_event_count = ics_output.count("BEGIN:VEVENT")
-    print(f"ICS written to {ics_path} ({ics_event_count} occurrences, {len(ics_output) / 1024:.1f} KB)")
-
-    # Step 8: Generate HTML
-    html_output = generate_html(merged_events, today, end, ics_filename=ics_path)
-    html_path = f"{stem}.html"
+    html_output = generate_html(merged_events, today, end)
+    html_path = os.path.join("output", f"{stem}.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_output)
     print(f"HTML written to {html_path} ({len(html_output) / 1024:.1f} KB)")
