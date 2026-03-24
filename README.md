@@ -31,4 +31,4 @@ Open `output/events_*.html` in a browser.
 ## Notes
 
 - Scraped via Dartmouth's internal AJAX endpoint (`/events/ajax/search`)
-- Rate-limited to 8 parallel requests with a small delay.
+- Takes about 15 seconds to generate.  (Rate-limited to 8 parallel requests with a small delay.)
