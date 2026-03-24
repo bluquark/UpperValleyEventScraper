@@ -435,47 +435,118 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     body = "\n".join(sections)
 
     css = """
+    :root {
+      --bg:             #121212;
+      --surface:        #1e1e1e;
+      --surface-muted:  #181818;
+      --border:         #333;
+      --border-muted:   #2a2a2a;
+      --border-body:    #2a2a2a;
+      --text:           #e5e5e5;
+      --text-muted:     #aaa;
+      --text-dim:       #888;
+      --text-desc:      #ccc;
+      --green:          #4ade80;
+      --green-bg:       #0d2a1a;
+      --arrow:          #555;
+      --shadow:         rgba(0,0,0,0.5);
+      --dates-bg:       #2a2000;
+      --dates-border:   #b45309;
+      --badge-bg:       #2d1b4e;
+      --badge-color:    #c084fc;
+      --chip-aud-bg:    #1e3a5f; --chip-aud-fg: #93c5fd;
+      --chip-spo-bg:    #14401f; --chip-spo-fg: #86efac;
+      --chip-con-bg:    #3a2200; --chip-con-fg: #fcd34d;
+      --gcal-bg:        #2a4a8a;
+      --gcal-hover:     #1e3a6e;
+      --title-important:   #ffffff;
+      --title-unimportant: #777;
+    }
+    body.light {
+      --bg:             #f5f5f5;
+      --surface:        #fff;
+      --surface-muted:  #fafafa;
+      --border:         #ddd;
+      --border-muted:   #e8e8e8;
+      --border-body:    #f0f0f0;
+      --text:           #1a1a1a;
+      --text-muted:     #555;
+      --text-dim:       #777;
+      --text-desc:      #333;
+      --green:          #00693e;
+      --green-bg:       #e8f4ee;
+      --arrow:          #999;
+      --shadow:         rgba(0,0,0,0.1);
+      --dates-bg:       #fff8e1;
+      --dates-border:   #f59e0b;
+      --badge-bg:       #f0e8ff;
+      --badge-color:    #6b21a8;
+      --chip-aud-bg:    #dbeafe; --chip-aud-fg: #1e40af;
+      --chip-spo-bg:    #dcfce7; --chip-spo-fg: #166534;
+      --chip-con-bg:    #fef3c7; --chip-con-fg: #92400e;
+      --gcal-bg:        #4285f4;
+      --gcal-hover:     #3367d6;
+      --title-important:   #111;
+      --title-unimportant: #999;
+    }
+
     * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       max-width: 860px;
       margin: 0 auto;
       padding: 1rem 1.5rem 4rem;
-      background: #f5f5f5;
-      color: #1a1a1a;
+      background: var(--bg);
+      color: var(--text);
       line-height: 1.5;
+      transition: background 0.2s, color 0.2s;
     }
-    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; color: #00693e; }
-    .subtitle { color: #555; margin-bottom: 1.5rem; font-size: 0.95rem; }
-    .stats { background: #e8f4ee; border-left: 4px solid #00693e; padding: 0.6rem 1rem;
+    .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; color: var(--green); }
+    .subtitle { color: var(--text-muted); margin-bottom: 1rem; font-size: 0.95rem; }
+    .subtitle a { color: var(--green); }
+    .stats { background: var(--green-bg); border-left: 4px solid var(--green); padding: 0.6rem 1rem;
              margin-bottom: 2rem; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+
+    #theme-btn {
+      font-size: 0.8rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    #theme-btn:hover { border-color: var(--green); color: var(--green); }
 
     h2.date-header {
       font-size: 1.1rem;
       font-weight: 700;
-      color: #00693e;
+      color: var(--green);
       margin: 2rem 0 0.5rem;
       padding: 0.4rem 0;
-      border-bottom: 2px solid #00693e;
+      border-bottom: 2px solid var(--green);
       position: sticky;
       top: 0;
-      background: #f5f5f5;
+      background: var(--bg);
       z-index: 10;
     }
 
     details.event {
       margin: 0.35rem 0;
       border-radius: 6px;
-      border: 1px solid #ddd;
-      background: #fff;
+      border: 1px solid var(--border);
+      background: var(--surface);
       transition: box-shadow 0.15s;
     }
     details.event[open] {
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      box-shadow: 0 2px 8px var(--shadow);
     }
     details.event.unimportant {
-      background: #fafafa;
-      border-color: #e8e8e8;
+      background: var(--surface-muted);
+      border-color: var(--border-muted);
       opacity: 0.85;
     }
     details.event.unimportant[open] {
@@ -496,7 +567,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     summary::before {
       content: "▶";
       font-size: 0.6rem;
-      color: #999;
+      color: var(--arrow);
       flex-shrink: 0;
       align-self: center;
       transition: transform 0.15s;
@@ -508,7 +579,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     .ev-time {
       font-size: 0.8rem;
       font-weight: 600;
-      color: #666;
+      color: var(--text-muted);
       white-space: nowrap;
       min-width: 90px;
     }
@@ -517,15 +588,17 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       font-size: 0.95rem;
       flex: 1;
     }
+    .important .ev-title { color: var(--title-important); }
+    .unimportant .ev-title { color: var(--title-unimportant); }
     .ev-location {
       font-size: 0.8rem;
-      color: #777;
+      color: var(--text-dim);
       font-style: italic;
     }
     .badge {
       font-size: 0.7rem;
-      background: #f0e8ff;
-      color: #6b21a8;
+      background: var(--badge-bg);
+      color: var(--badge-color);
       border-radius: 3px;
       padding: 0.1rem 0.4rem;
       white-space: nowrap;
@@ -533,7 +606,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 
     .ev-body {
       padding: 0.75rem 1rem 1rem 2.5rem;
-      border-top: 1px solid #f0f0f0;
+      border-top: 1px solid var(--border-body);
     }
     .ev-image {
       float: right;
@@ -543,33 +616,33 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     }
     .ev-dates {
       font-size: 0.82rem;
-      background: #fff8e1;
-      border-left: 3px solid #f59e0b;
+      background: var(--dates-bg);
+      border-left: 3px solid var(--dates-border);
       padding: 0.3rem 0.6rem;
       margin-bottom: 0.75rem;
       border-radius: 0 4px 4px 0;
     }
     .ev-description {
       font-size: 0.88rem;
-      color: #333;
+      color: var(--text-desc);
       margin-bottom: 0.75rem;
       clear: both;
     }
     .ev-description p { margin: 0.4rem 0; }
-    .ev-description a { color: #00693e; }
+    .ev-description a { color: var(--green); }
     .ev-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
     .chip {
       font-size: 0.75rem;
       padding: 0.2rem 0.5rem;
       border-radius: 12px;
     }
-    .chip-audience { background: #dbeafe; color: #1e40af; }
-    .chip-sponsor  { background: #dcfce7; color: #166534; }
-    .chip-contact  { background: #fef3c7; color: #92400e; }
+    .chip-audience { background: var(--chip-aud-bg); color: var(--chip-aud-fg); }
+    .chip-sponsor  { background: var(--chip-spo-bg); color: var(--chip-spo-fg); }
+    .chip-contact  { background: var(--chip-con-bg); color: var(--chip-con-fg); }
     .ev-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.5rem; }
     .ev-link {
       font-size: 0.8rem;
-      color: #00693e;
+      color: var(--green);
       text-decoration: none;
       font-weight: 500;
     }
@@ -582,12 +655,12 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       font-size: 0.75rem;
       padding: 0.25rem 0.55rem;
       border-radius: 4px;
-      background: #4285f4;
+      background: var(--gcal-bg);
       color: #fff;
       text-decoration: none;
       white-space: nowrap;
     }
-    .gcal-btn:hover { background: #3367d6; }
+    .gcal-btn:hover { background: var(--gcal-hover); }
     @media (max-width: 600px) {
       .ev-image { float: none; max-width: 100%; margin: 0 0 0.5rem; }
       summary { flex-direction: column; gap: 0.2rem; }
@@ -605,7 +678,10 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
   <style>{css}</style>
 </head>
 <body>
-  <h1>Dartmouth Events</h1>
+  <div class="header-row">
+    <h1>Dartmouth Events</h1>
+    <button id="theme-btn" onclick="toggleTheme()">☀ Light mode</button>
+  </div>
   <p class="subtitle">Scraped from <a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a></p>
   <div class="stats">
     Showing <strong>{total}</strong> events ({important_count} open, {total - important_count} collapsed)
@@ -614,6 +690,18 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     Recurring events are merged into a single entry.
   </div>
   {body}
+<script>
+  function toggleTheme() {{
+    const light = document.body.classList.toggle('light');
+    document.getElementById('theme-btn').textContent = light ? '🌙 Dark mode' : '☀ Light mode';
+    localStorage.setItem('theme', light ? 'light' : 'dark');
+  }}
+  // Apply saved preference (default: dark)
+  if (localStorage.getItem('theme') === 'light') {{
+    document.body.classList.add('light');
+    document.getElementById('theme-btn').textContent = '🌙 Dark mode';
+  }}
+</script>
 </body>
 </html>"""
 
