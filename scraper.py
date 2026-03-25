@@ -1480,7 +1480,7 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
     for ev in merged_events:
         ev["unimportant"] = is_unimportant(ev.get("title", ""), ev.get("audience", ""))
     uc = sum(1 for e in merged_events if e["unimportant"])
-    print(f"Dartmouth — Important: {len(merged_events) - uc}, Unimportant: {uc}")
+    print(f"Dartmouth - Important: {len(merged_events) - uc}, Unimportant: {uc}")
     return merged_events
 
 
@@ -1538,7 +1538,7 @@ def run_scrape_northernstage(today: date, end: date) -> list[dict]:
         html = resp.text
         m = re.search(r'\{"name":"fetchEvents"[^}]+\}', html)
         if not m:
-            print("Warning: Northern Stage — could not find fetchEvents config", file=sys.stderr)
+            print("Warning: Northern Stage - could not find fetchEvents config", file=sys.stderr)
             return []
         config = json.loads(m.group(0))
         csrf = config["csrf"]
