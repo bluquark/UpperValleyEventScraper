@@ -1,13 +1,12 @@
 # Upper Valley Events Scraper
 
-Scrapes upcoming public cultural events from several Upper Valley websites into one big
+Scrapes upcoming public cultural events from several Upper Valley (VT/NH) websites into one big
 page with Google Calendar buttons.
 
 **Sources:**
 - [home.dartmouth.edu/events](https://home.dartmouth.edu/events)
 - [nhhumanities.org/programs/upcoming](https://www.nhhumanities.org/programs/upcoming)
 - [northernstage.org](https://northernstage.org) (theater)
-- [nlbarn.org](https://www.nlbarn.org) (National Theatre Live screenings)
 - [shakerbridgetheatre.org](https://www.shakerbridgetheatre.org) (theater)
 - [nugget-theaters.com](https://www.nugget-theaters.com) (Nugget Theater, Hanover)
 - [entertainmentcinemas.com/lebanon-6](https://www.entertainmentcinemas.com/lebanon-6) (Lebanon 6)
@@ -30,9 +29,9 @@ python scraper.py [--scrape=SOURCES] [--days=N]
 
 |---|---|
 | `all` | All sources |
-| `theater` | `northernstage`, `nlbarn`, `shakerbridgetheatre` |
+| `theater` | `northernstage`, `shakerbridgetheatre` |
 | `movies` | `nugget`, `lebanon6` |
-| `dartmouth`, `nhhumanities`, `northernstage`, `nlbarn`, `shakerbridgetheatre`, `nugget`, `lebanon6` | Individual sources |
+| `dartmouth`, `nhhumanities`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6` | Individual sources |
 
 ### Examples
 
@@ -65,7 +64,6 @@ Scraped data is stored as JSON in `output/` before HTML generation:
 | Dartmouth | `output/scraped_dartmouth.json` |
 | NH Humanities | `output/scraped_nhhumanities.json` |
 | Northern Stage | `output/scraped_northernstage.json` |
-| NL Barn | `output/scraped_nlbarn.json` |
 | Shaker Bridge | `output/scraped_shakerbridgetheatre.json` |
 | Nugget Theater | `output/scraped_nugget.json` |
 | Lebanon 6 | `output/scraped_lebanon6.json` |

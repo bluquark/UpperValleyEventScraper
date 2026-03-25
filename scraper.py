@@ -5,7 +5,6 @@ Fetches 30 days of events from:
   - home.dartmouth.edu/events
   - nhhumanities.org/programs/upcoming
   - northernstage.org
-  - nlbarn.org (National Theatre Live screenings)
   - shakerbridgetheatre.org
 Produces a self-contained HTML page with color-coded, filterable events.
 """
@@ -48,9 +47,6 @@ NS_SKIP_NAMES = re.compile(
     re.IGNORECASE
 )
 
-NLBARN_BASE = "https://www.nlbarn.org"
-NLBARN_NTL_URL = f"{NLBARN_BASE}/national-theatre-live"
-
 SHBT_BASE = "https://www.shakerbridgetheatre.org"
 SHBT_TICKETS_URL = "https://app.arts-people.com/index.php?ticketing=sbt"
 
@@ -82,7 +78,7 @@ MONTH_MAP = {
     'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
 }
 
-THEATER_SOURCES = ["northernstage", "nlbarn", "shakerbridgetheatre"]
+THEATER_SOURCES = ["northernstage", "shakerbridgetheatre"]
 MOVIE_SOURCES = ["nugget", "lebanon6"]
 ALL_SOURCES = ["dartmouth", "nhhumanities"] + THEATER_SOURCES + MOVIE_SOURCES
 SOURCE_GROUPS = {
@@ -383,118 +379,6 @@ def _theater_show_to_event(show: dict, today: date) -> dict:
         "duration": f"{run_days} days",
         "unimportant": False,
     }
-
-
-# ---------------------------------------------------------------------------
-# NL Barn scraping
-# ---------------------------------------------------------------------------
-
-_MONTH_RE = re.compile(
-    r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\b',
-    re.IGNORECASE,
-)
-
-
-def _nlbarn_parse_date(text: str) -> tuple[date | None, str]:
-    """Parse 'Saturday, April 18th at 2pm' → (date, '2pm')."""
-    clean = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', text)
-    m = re.match(r'\w+,\s+(\w+ \d+)\s+at\s+(\d+(?::\d+)?\s*[ap]m)', clean.strip(), re.IGNORECASE)
-    if not m:
-        return None, text.strip()
-    month_day, time_part = m.group(1), m.group(2).strip()
-    for year in [date.today().year, date.today().year + 1]:
-        try:
-            return datetime.strptime(f"{month_day} {year}", "%B %d %Y").date(), time_part
-        except ValueError:
-            continue
-    return None, time_part
-
-
-def _nlbarn_fetch_page(url: str) -> list[dict]:
-    """Scrape NL Barn page for show blocks (h3 title + strong date).
-
-    Squarespace puts h3 and the following strong-date in separate fe-block
-    siblings, so we scan descendants in document order and match each date
-    to the nearest preceding h3.
-    """
-    try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  Warning: could not fetch {url}: {e}", file=sys.stderr)
-        return []
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Collect (position, tag) for h3s and strong-dates in document order
-    h3_tags: list[tuple[int, object]] = []
-    date_tags: list[tuple[int, object]] = []
-    for i, tag in enumerate(soup.descendants):
-        name = getattr(tag, "name", None)
-        if name == "h3":
-            h3_tags.append((i, tag))
-        elif name == "strong" and _MONTH_RE.search(tag.get_text(strip=True) or ""):
-            date_tags.append((i, tag))
-
-    events = []
-    seen_titles: set[str] = set()
-    for date_pos, date_tag in date_tags:
-        date_text = date_tag.get_text(strip=True)
-        ev_date, time_str = _nlbarn_parse_date(date_text)
-        if not ev_date:
-            continue
-        # Nearest h3 preceding this date tag
-        preceding = [(p, t) for p, t in h3_tags if p < date_pos]
-        if not preceding:
-            continue
-        _, h3_tag = preceding[-1]
-        title = h3_tag.get_text(strip=True)
-        if not title or title in seen_titles:
-            continue
-        seen_titles.add(title)
-
-        # Walk up from the date tag to find its fe-block, then look for
-        # ticket link, description, image in the surrounding fluid-engine
-        fluid = date_tag.find_parent(class_=re.compile(r'fluid-engine'))
-        container = fluid or date_tag.find_parent("div")
-
-        ticket_url = url
-        description = ""
-        image = ""
-        author = ""
-        if container:
-            a = container.find("a", href=re.compile(r'ovationtix\.com'))
-            if a:
-                ticket_url = a["href"]
-            em = container.find("em")
-            if em:
-                author = em.get_text(strip=True)
-            desc_parts = []
-            for p in container.find_all("p"):
-                t = p.get_text(strip=True)
-                if (t and len(t) > 15
-                        and not _MONTH_RE.search(t)
-                        and "tickets" not in t.lower()
-                        and t != author):
-                    desc_parts.append(f"<p>{t}</p>")
-            if author:
-                desc_parts.insert(0, f"<p><em>{author}</em></p>")
-            description = "\n".join(desc_parts)
-            img = container.find("img")
-            if img:
-                image = img.get("src", "")
-
-        events.append({
-            "id": ticket_url or f"nlbarn_{ev_date.isoformat()}_{title[:20]}",
-            "title": title,
-            "date": ev_date,
-            "time_str": time_str or "",
-            "description": description,
-            "image": image,
-            "url": ticket_url,
-            "location": "Fleming Center, New London",
-            "source": "nlbarn",
-        })
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -909,7 +793,6 @@ SOURCE_META = {
     "dartmouth":          {"label": "Dartmouth",       "group": "dartmouth"},
     "nhhumanities":       {"label": "NH Humanities",   "group": "nhhumanities"},
     "northernstage":      {"label": "Northern Stage",  "group": "theater"},
-    "nlbarn":             {"label": "NL Barn",          "group": "theater"},
     "shakerbridgetheatre":{"label": "Shaker Bridge",   "group": "theater"},
     "nugget":             {"label": "Nugget Theater",   "group": "movies"},
     "lebanon6":           {"label": "Lebanon 6",        "group": "movies"},
@@ -1124,8 +1007,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-nhhumanities:        #38bdf8;
       --surf-northernstage:      #1f1700; --bord-northernstage:      #3d2e00;
       --pip-northernstage:       #fbbf24;
-      --surf-nlbarn:             #1a1200; --bord-nlbarn:             #332200;
-      --pip-nlbarn:              #fb923c;
       --surf-shakerbridgetheatre:#200a00; --bord-shakerbridgetheatre:#3d1500;
       --pip-shakerbridgetheatre: #f87171;
       --surf-nugget:             #080d1a; --bord-nugget:             #1a2a40;
@@ -1173,8 +1054,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-nhhumanities:        #0284c7;
       --surf-northernstage:      #fffbeb; --bord-northernstage:      #fde68a;
       --pip-northernstage:       #d97706;
-      --surf-nlbarn:             #fff7ed; --bord-nlbarn:             #fed7aa;
-      --pip-nlbarn:              #ea580c;
       --surf-shakerbridgetheatre:#fff5f5; --bord-shakerbridgetheatre:#fecaca;
       --pip-shakerbridgetheatre: #dc2626;
       --surf-nugget:             #eff6ff; --bord-nugget:             #bfdbfe;
@@ -1225,7 +1104,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     details.source-dartmouth           { background: var(--surf-dartmouth);           border-color: var(--bord-dartmouth); }
     details.source-nhhumanities        { background: var(--surf-nhhumanities);        border-color: var(--bord-nhhumanities); }
     details.source-northernstage       { background: var(--surf-northernstage);       border-color: var(--bord-northernstage); }
-    details.source-nlbarn              { background: var(--surf-nlbarn);              border-color: var(--bord-nlbarn); }
     details.source-shakerbridgetheatre { background: var(--surf-shakerbridgetheatre); border-color: var(--bord-shakerbridgetheatre); }
     details.source-nugget              { background: var(--surf-nugget);              border-color: var(--bord-nugget); }
     details.source-lebanon6            { background: var(--surf-lebanon6);            border-color: var(--bord-lebanon6); }
@@ -1251,7 +1129,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     .source-pip-dartmouth           { background: var(--pip-dartmouth); }
     .source-pip-nhhumanities        { background: var(--pip-nhhumanities); }
     .source-pip-northernstage       { background: var(--pip-northernstage); }
-    .source-pip-nlbarn              { background: var(--pip-nlbarn); }
     .source-pip-shakerbridgetheatre { background: var(--pip-shakerbridgetheatre); }
     .source-pip-nugget              { background: var(--pip-nugget); }
     .source-pip-lebanon6            { background: var(--pip-lebanon6); }
@@ -1330,7 +1207,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
         "dartmouth":           '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
         "nhhumanities":        '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
         "northernstage":       '<a href="https://northernstage.org">northernstage.org</a>',
-        "nlbarn":              '<a href="https://www.nlbarn.org">nlbarn.org</a>',
         "shakerbridgetheatre": '<a href="https://www.shakerbridgetheatre.org">shakerbridgetheatre.org</a>',
         "nugget":              '<a href="https://www.nugget-theaters.com">nugget-theaters.com</a>',
         "lebanon6":            '<a href="https://www.entertainmentcinemas.com/lebanon-6">entertainmentcinemas.com/lebanon-6</a>',
@@ -1417,7 +1293,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     document.querySelectorAll('h2.date-header').forEach(h => {{
       let sib = h.nextElementSibling, visible = false;
       while (sib && !sib.classList.contains('date-header')) {{
-        if (sib.style.display !== 'none') {{ visible = true; break; }}
+        if (sib.classList.contains('event') && sib.style.display !== 'none') {{ visible = true; break; }}
         sib = sib.nextElementSibling;
       }}
       h.style.display = visible ? '' : 'none';
@@ -1716,21 +1592,6 @@ def run_scrape_northernstage(today: date, end: date) -> list[dict]:
     return events
 
 
-def run_scrape_nlbarn(today: date, end: date) -> list[dict]:
-    print("Fetching NL Barn National Theatre Live page...")
-    raw = _nlbarn_fetch_page(NLBARN_NTL_URL)
-    # Filter to window
-    events = []
-    for ev in raw:
-        d = ev.get("date")
-        if d and today <= d <= end:
-            ev["dates"] = [d]
-            ev["unimportant"] = False
-            events.append(ev)
-    print(f"NL Barn: {len(events)} events in window")
-    return events
-
-
 def run_scrape_shakerbridgetheatre(today: date, end: date) -> list[dict]:
     print("Fetching Shaker Bridge Theatre ticketing page...")
     try:
@@ -1762,11 +1623,12 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
     os.makedirs("output", exist_ok=True)
     start, end = min(starts), max(ends)
     html_output = generate_html(all_events, start, end)
-    html_path = os.path.join("output", f"events_{today.isoformat()}.html")
+    now_str = datetime.now(EASTERN).strftime("%Y-%m-%dT%H-%M")
+    html_path = os.path.join("output", f"events_{now_str}.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_output)
     print(f"HTML written to {html_path} ({len(html_output) / 1024:.1f} KB)")
-    html_filename = f"events_{today.isoformat()}.html"
+    html_filename = f"events_{now_str}.html"
     symlink = os.path.join("output", "events.html")
     if os.path.islink(symlink) or os.path.exists(symlink):
         os.remove(symlink)
@@ -1782,7 +1644,6 @@ SCRAPE_FNS = {
     "dartmouth":           run_scrape_dartmouth,
     "nhhumanities":        run_scrape_nhhumanities,
     "northernstage":       run_scrape_northernstage,
-    "nlbarn":              run_scrape_nlbarn,
     "shakerbridgetheatre": run_scrape_shakerbridgetheatre,
     "nugget":              run_scrape_nugget,
     "lebanon6":            run_scrape_lebanon6,
