@@ -1,15 +1,9 @@
 # Upper Valley Events Scraper
 
-Scrapes upcoming public cultural events from several Upper Valley (VT/NH) websites into one big
-page with Google Calendar buttons.
+This script collects upcoming cultural events scheduled to take place within the Upper Valley
+(VT/NH) into one convenient page, with add-to-Google-Calendar buttons.
 
-**Sources:**
-- [home.dartmouth.edu/events](https://home.dartmouth.edu/events)
-- [nhhumanities.org/programs/upcoming](https://www.nhhumanities.org/programs/upcoming)
-- [northernstage.org](https://northernstage.org) (theater)
-- [shakerbridgetheatre.org](https://www.shakerbridgetheatre.org) (theater)
-- [nugget-theaters.com](https://www.nugget-theaters.com) (Nugget Theater, Hanover)
-- [entertainmentcinemas.com/lebanon-6](https://www.entertainmentcinemas.com/lebanon-6) (Lebanon 6)
+Results hosted on https://bluquark.github.io/UpperValleyEventScraper/events.html.  Refreshes nightly.
 
 ![Screenshot](example_screenshot.png)
 
@@ -49,19 +43,3 @@ Scrape only nhhumanities with a 60-day window, then regenerate all:
 ```
 python scraper.py --sources=nhhumanities --days=60
 ```
-
-## Intermediate files
-
-Scraped data is stored as JSON in `output/` before HTML generation:
-
-| Source | File |
-|---|---|
-| Dartmouth | `output/scraped_dartmouth.json` |
-| NH Humanities | `output/scraped_nhhumanities.json` |
-| Northern Stage | `output/scraped_northernstage.json` |
-| Shaker Bridge | `output/scraped_shakerbridgetheatre.json` |
-| Nugget Theater | `output/scraped_nugget.json` |
-| Lebanon 6 | `output/scraped_lebanon6.json` |
-
-This lets you re-generate the HTML (e.g. to tweak styling) without re-fetching all event pages.
-
