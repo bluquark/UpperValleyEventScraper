@@ -1,0 +1,37 @@
+name: Scrape and publish events
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # daily at 8am UTC (4am Eastern)
+  workflow_dispatch:       # allow manual runs from the Actions tab
+
+permissions:
+  contents: write          # needed to push the result back
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        run: python scraper.py --sources=all
+
+      - name: Copy output to index.html
+        run: cp output/events.html index.html
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet || git commit -m "Update events $(date -u +%Y-%m-%d)"
+          git push
