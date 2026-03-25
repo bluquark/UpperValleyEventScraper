@@ -45,14 +45,10 @@ Scrape everything and regenerate:
 python scraper.py --sources=all
 ```
 
-Scrape only movies with a 60-day window, then regenerate all:
+Scrape only nhhumanities with a 60-day window, then regenerate all:
 ```
-python scraper.py --sources=movies  --days=60
+python scraper.py --sources=nhhumanities --days=60
 ```
-
-60-day window, write output directly to a web root:
-```
-python scraper.py --sources=all
 ```
 
 ## Intermediate files
@@ -70,8 +66,3 @@ Scraped data is stored as JSON in `output/` before HTML generation:
 
 This lets you re-generate the HTML (e.g. to tweak styling) without re-fetching all event pages.
 
-## Notes
-
-- Dartmouth: scraped via internal AJAX endpoint (`/events/ajax/search`), ~15s with 8 parallel requests
-- NH Humanities: listing page parsed for event list; detail pages fetched in parallel
-- Movies: showtime pages fetched day-by-day; per-film entries merged into a single card with a schedule table
