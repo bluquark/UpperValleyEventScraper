@@ -56,7 +56,6 @@ NUGGET_TICKETS_URL = "http://28879.formovietickets.com:2235"
 LEBANON6_BASE = "https://www.entertainmentcinemas.com"
 LEBANON6_URL = f"{LEBANON6_BASE}/lebanon-6"
 
-MOVIE_FETCH_DAYS = 7
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -622,9 +621,10 @@ def _dedup_movies(events: list[dict]) -> list[dict]:
 
 
 def run_scrape_nugget(today: date, end: date) -> list[dict]:
-    print(f"Fetching Nugget Theater showtimes ({MOVIE_FETCH_DAYS} days)...")
+    n = min((end - today).days + 1, 14)
+    print(f"Fetching Nugget Theater showtimes ({n} days)...")
     events = []
-    days = [today + timedelta(days=i) for i in range(MOVIE_FETCH_DAYS)]
+    days = [today + timedelta(days=i) for i in range(n)]
     with ThreadPoolExecutor(max_workers=4) as pool:
         for day_events in pool.map(_nugget_fetch_day, days):
             events.extend(day_events)
@@ -645,9 +645,10 @@ def _lebanon6_fetch_synopsis(url: str) -> str:
 
 
 def run_scrape_lebanon6(today: date, end: date) -> list[dict]:
-    print(f"Fetching Lebanon 6 showtimes ({MOVIE_FETCH_DAYS} days)...")
+    n = min((end - today).days + 1, 14)
+    print(f"Fetching Lebanon 6 showtimes ({n} days)...")
     events = []
-    days = [today + timedelta(days=i) for i in range(MOVIE_FETCH_DAYS)]
+    days = [today + timedelta(days=i) for i in range(n)]
     with ThreadPoolExecutor(max_workers=4) as pool:
         for day_events in pool.map(_lebanon6_fetch_day, days):
             events.extend(day_events)
@@ -1409,6 +1410,8 @@ def save_scrape_results(source: str, events: list[dict], start: date, end: date)
 
 def load_scrape_results(source: str) -> tuple[list[dict], date, date]:
     path = INTERMEDIATE_FILES[source]
+    if not os.path.exists(path):
+        sys.exit(f"Error: {path} not found. Run with --sources=all (or --sources={source}) to fetch data first.")
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f, object_hook=_json_hook)
     start = date.fromisoformat(payload["start"])
@@ -1681,12 +1684,12 @@ Groups:  all, theater, movies  (theater = {', '.join(THEATER_SOURCES)}; movies =
 
 Examples:
   python scraper.py                        # generate HTML from existing data files
-  python scraper.py --scrape=all           # scrape everything, then generate
-  python scraper.py --scrape=theater       # scrape theater sources only, then generate
-  python scraper.py --scrape=dartmouth     # scrape Dartmouth only, then generate
+  python scraper.py --sources=all          # scrape everything, then generate
+  python scraper.py --sources=theater      # scrape theater sources only, then generate
+  python scraper.py --sources=dartmouth    # scrape Dartmouth only, then generate
         """,
     )
-    parser.add_argument("--scrape", type=parse_sources, metavar="SOURCES",
+    parser.add_argument("--sources", type=parse_sources, metavar="SOURCES",
                         help="Comma-separated sources/groups to scrape before generating")
     parser.add_argument("--days", type=int, default=90, metavar="N",
                         help="Number of days in the date range (default: 30)")
@@ -1695,8 +1698,8 @@ Examples:
     today = date.today()
     end = today + timedelta(days=args.days)
 
-    if args.scrape:
-        for source in args.scrape:
+    if args.sources:
+        for source in args.sources:
             events = SCRAPE_FNS[source](today, end)
             save_scrape_results(source, events, today, end)
 

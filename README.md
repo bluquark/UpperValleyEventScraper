@@ -24,14 +24,14 @@ Python 3.9+ required.
 ## Usage
 
 ```
-python scraper.py [--scrape=SOURCES] [--days=N]
+python scraper.py [--sources=SOURCES] [--days=N]
 ```
 
-|---|---|
-| `all` | All sources |
-| `theater` | `northernstage`, `shakerbridgetheatre` |
-| `movies` | `nugget`, `lebanon6` |
-| `dartmouth`, `nhhumanities`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6` | Individual sources |
+`--sources` accepts a comma-separated list of sources or groups:
+- `all` — all sources
+- `theater` — `northernstage`, `shakerbridgetheatre`
+- `movies` — `nugget`, `lebanon6`
+- individual: `dartmouth`, `nhhumanities`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6`
 
 ### Examples
 
@@ -42,17 +42,17 @@ python scraper.py
 
 Scrape everything and regenerate:
 ```
-python scraper.py --scrape=all
+python scraper.py --sources=all
 ```
 
 Scrape only movies with a 60-day window, then regenerate all:
 ```
-python scraper.py --scrape=movies  --days=60
+python scraper.py --sources=movies  --days=60
 ```
 
 60-day window, write output directly to a web root:
 ```
-python scraper.py --scrape=all
+python scraper.py --sources=all
 ```
 
 ## Intermediate files
