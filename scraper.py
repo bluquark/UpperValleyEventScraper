@@ -4,8 +4,10 @@ Upper Valley Events Scraper
 Fetches 30 days of events from:
   - home.dartmouth.edu/events
   - nhhumanities.org/programs/upcoming
+  - northernstage.org
+  - nlbarn.org (National Theatre Live screenings)
+  - shakerbridgetheatre.org
 Produces a self-contained HTML page with color-coded, filterable events.
-Recurring Dartmouth events are merged; academic/non-public ones are collapsed.
 """
 
 import argparse
@@ -18,7 +20,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote_plus
 
 try:
     from zoneinfo import ZoneInfo
@@ -30,34 +32,70 @@ import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
-# Dartmouth constants
+# Constants
 # ---------------------------------------------------------------------------
 DARTMOUTH_BASE = "https://home.dartmouth.edu"
 DARTMOUTH_AJAX_URL = f"{DARTMOUTH_BASE}/events/ajax/search"
 DARTMOUTH_DETAIL_URL = f"{DARTMOUTH_BASE}/events/event"
 
-# ---------------------------------------------------------------------------
-# NH Humanities constants
-# ---------------------------------------------------------------------------
 NHH_BASE = "https://www.nhhumanities.org"
 NHH_LIST_URL = f"{NHH_BASE}/programs/upcoming"
 
-# ---------------------------------------------------------------------------
-# Shared
-# ---------------------------------------------------------------------------
+NORTHERNSTAGE_BASE = "https://northernstage.org"
+NORTHERNSTAGE_SEASON_URL = f"{NORTHERNSTAGE_BASE}/2025-26-season/"
+NORTHERNSTAGE_SKIP_SLUGS = {
+    "", "events", "tickets", "about", "donate", "education", "subscribe",
+    "access", "blog", "contact", "shop", "news", "volunteer", "corporate",
+    "privacy", "terms", "accessibility", "2025-26-season", "26-27season",
+    "feed", "sitemap", "cart", "checkout", "account", "login",
+}
+
+NLBARN_BASE = "https://www.nlbarn.org"
+NLBARN_NTL_URL = f"{NLBARN_BASE}/national-theatre-live"
+
+SHBT_BASE = "https://www.shakerbridgetheatre.org"
+SHBT_SEASON_URL = f"{SHBT_BASE}/2025-2026-season"
+SHBT_BRIDGE_URL = f"{SHBT_BASE}/bridgeseries"
+SHBT_TICKETS_URL = "https://app.arts-people.com/index.php?ticketing=sbt"
+
+NUGGET_BASE = "https://www.nugget-theaters.com"
+NUGGET_TICKETS_URL = "http://28879.formovietickets.com:2235"
+
+LEBANON6_BASE = "https://www.entertainmentcinemas.com"
+LEBANON6_URL = f"{LEBANON6_BASE}/lebanon-6"
+
+MOVIE_FETCH_DAYS = 7
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+}
+
 UNIMPORTANT_KEYWORDS = re.compile(r'\b(seminar|colloquium|thesis|dissertation)\b', re.IGNORECASE)
+
+# Towns within ~30 minutes drive of Lebanon NH (used to flag far-away NH Humanities events)
+NHH_NEARBY_TOWNS = {
+    "Lebanon", "West Lebanon", "Hanover", "Enfield", "Canaan", "Lyme",
+    "Plainfield", "Meriden", "Cornish", "Grantham", "Orford",
+    "White River Junction", "Hartford", "Wilder", "Norwich", "Thetford",
+    "Sharon", "Quechee", "Hartland", "Windsor", "Claremont",
+}
 
 MONTH_MAP = {
     'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
     'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
 }
 
-ALL_SOURCES = ["dartmouth", "nhhumanities"]
-
-INTERMEDIATE_FILES = {
-    "dartmouth": os.path.join("output", "scraped_dartmouth.json"),
-    "nhhumanities": os.path.join("output", "scraped_nhhumanities.json"),
+THEATER_SOURCES = ["northernstage", "nlbarn", "shakerbridgetheatre"]
+MOVIE_SOURCES = ["nugget", "lebanon6"]
+ALL_SOURCES = ["dartmouth", "nhhumanities"] + THEATER_SOURCES + MOVIE_SOURCES
+SOURCE_GROUPS = {
+    "all": ALL_SOURCES,
+    "theater": THEATER_SOURCES,
+    "movies": MOVIE_SOURCES,
 }
+
+INTERMEDIATE_FILES = {s: os.path.join("output", f"scraped_{s}.json") for s in ALL_SOURCES}
 
 
 # ---------------------------------------------------------------------------
@@ -65,13 +103,7 @@ INTERMEDIATE_FILES = {
 # ---------------------------------------------------------------------------
 
 def fetch_event_list(start: date, end: date) -> str:
-    """Fetch all events in date range via AJAX API. Returns HTML string of teasers."""
-    params = {
-        "offset": 0,
-        "limit": 300,
-        "begin": start.isoformat(),
-        "end": end.isoformat(),
-    }
+    params = {"offset": 0, "limit": 300, "begin": start.isoformat(), "end": end.isoformat()}
     print(f"Fetching Dartmouth event list ({start} to {end})...")
     resp = requests.get(DARTMOUTH_AJAX_URL, params=params, timeout=30)
     resp.raise_for_status()
@@ -83,7 +115,6 @@ def fetch_event_list(start: date, end: date) -> str:
 
 
 def parse_event_list(html: str, ref_year: int) -> list[dict]:
-    """Parse the event teaser HTML and return list of raw event dicts."""
     soup = BeautifulSoup(html, "html.parser")
     events = []
     for teaser in soup.find_all("div", class_="event-teaser"):
@@ -95,7 +126,6 @@ def parse_event_list(html: str, ref_year: int) -> list[dict]:
         if not m:
             continue
         event_id = m.group(1)
-
         day_el = teaser.select_one(".event-teaser__date-day")
         month_el = teaser.select_one(".event-teaser__date-month")
         day = int(day_el.get_text(strip=True)) if day_el else 0
@@ -104,16 +134,13 @@ def parse_event_list(html: str, ref_year: int) -> list[dict]:
         year = ref_year
         if month < date.today().month - 1:
             year = ref_year + 1
-
         time_el = teaser.select_one(".event-teaser__time")
         time_str = time_el.get_text(strip=True) if time_el else ""
         summary_el = teaser.select_one(".event-teaser__summary")
         summary = summary_el.get_text(strip=True) if summary_el else ""
-        title = title_link.get_text(strip=True)
-
         events.append({
             "id": event_id,
-            "title": title,
+            "title": title_link.get_text(strip=True),
             "date": date(year, month, day) if month and day else None,
             "time_str": time_str,
             "summary": summary,
@@ -123,7 +150,6 @@ def parse_event_list(html: str, ref_year: int) -> list[dict]:
 
 
 def fetch_detail(event_id: str) -> tuple[str, str | None]:
-    """Fetch detail page HTML for one Dartmouth event."""
     try:
         time.sleep(0.05)
         resp = requests.get(DARTMOUTH_DETAIL_URL, params={"event": event_id}, timeout=30)
@@ -135,9 +161,7 @@ def fetch_detail(event_id: str) -> tuple[str, str | None]:
 
 
 def parse_detail(html: str) -> dict:
-    """Parse Dartmouth event detail page and return structured data dict."""
     soup = BeautifulSoup(html, "html.parser")
-
     ld_tag = soup.find("script", type="application/ld+json")
     ld = {}
     if ld_tag and ld_tag.string:
@@ -145,17 +169,14 @@ def parse_detail(html: str) -> dict:
             ld = json.loads(ld_tag.string)
         except json.JSONDecodeError:
             pass
-
     meta_items = soup.select(".news-event--meta__item--text")
     time_str = ""
     if len(meta_items) >= 2:
         time_str = meta_items[1].get_text(strip=True)
         if time_str == "Add to Calendar":
             time_str = ""
-
     contact_el = soup.select_one(".news-event--details__group--contact .news-event--details__group-text")
     contact = contact_el.get_text(strip=True) if contact_el else ""
-
     body_el = soup.select_one(".news-event--body")
     body_html = ""
     if body_el:
@@ -163,7 +184,6 @@ def parse_detail(html: str) -> dict:
             if a["href"].startswith("/"):
                 a["href"] = DARTMOUTH_BASE + a["href"]
         body_html = str(body_el.decode_contents())
-
     start_iso = ld.get("startDate", "")
     start_dt_utc = None
     if start_iso:
@@ -173,7 +193,6 @@ def parse_detail(html: str) -> dict:
             start_dt_utc = dt.astimezone(timezone.utc)
         except (ValueError, TypeError):
             pass
-
     return {
         "title": ld.get("name", ""),
         "about": ld.get("about", ""),
@@ -195,19 +214,11 @@ def parse_detail(html: str) -> dict:
 # NH Humanities scraping
 # ---------------------------------------------------------------------------
 
-NHH_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-}
-
-
 def fetch_nhh_event_list() -> list[dict]:
-    """Fetch all upcoming NH Humanities events. Returns list of partial event dicts."""
-    print(f"Fetching NH Humanities event list...")
-    resp = requests.get(NHH_LIST_URL, headers=NHH_HEADERS, timeout=30)
+    print("Fetching NH Humanities event list...")
+    resp = requests.get(NHH_LIST_URL, headers=BROWSER_HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-
     events = []
     for ev_div in soup.find_all("div", class_="event"):
         title_link = ev_div.find("a", class_="title")
@@ -216,50 +227,38 @@ def fetch_nhh_event_list() -> list[dict]:
         title = title_link.get_text(strip=True)
         href = title_link.get("href", "")
         url = (NHH_BASE + href) if href.startswith("/") else href
-
         date_div = ev_div.find("div", class_="date")
-        date_text = ""
-        location = ""
+        date_text = location = ""
         if date_div:
             parts = [p.strip() for p in date_div.get_text("\n").split("\n") if p.strip()]
             if parts:
                 date_text = parts[0]
             if len(parts) >= 2:
                 location = parts[1]
-
         img_el = ev_div.find("img", class_="thumb")
         image = img_el.get("src", "") if img_el else ""
         if image and image.startswith("/"):
             image = NHH_BASE + image
-
         virtual_el = ev_div.find("div", class_="virtual")
         virtual = virtual_el.get_text(strip=True) if virtual_el else ""
-
         ev_date = None
         if date_text:
             try:
                 ev_date = datetime.strptime(date_text, "%A, %B %d, %Y").date()
             except ValueError:
                 pass
-
         events.append({
-            "id": url,  # use URL as stable ID
-            "title": title,
-            "url": url,
-            "date": ev_date,
-            "location": location,
-            "image": image,
-            "virtual": virtual,
+            "id": url, "title": title, "url": url, "date": ev_date,
+            "location": location, "image": image, "virtual": virtual,
             "source": "nhhumanities",
         })
     return events
 
 
 def fetch_nhh_detail(url: str) -> tuple[str, str | None]:
-    """Fetch detail page HTML for one NH Humanities event."""
     try:
         time.sleep(0.05)
-        resp = requests.get(url, headers=NHH_HEADERS, timeout=30)
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
         if resp.status_code == 200:
             return url, resp.text
     except Exception as e:
@@ -268,16 +267,11 @@ def fetch_nhh_detail(url: str) -> tuple[str, str | None]:
 
 
 def parse_nhh_detail(html: str, event_date: date | None) -> dict:
-    """Parse NH Humanities event detail page."""
     soup = BeautifulSoup(html, "html.parser")
-
     h1 = soup.find("h1")
     title = h1.get_text(strip=True) if h1 else ""
-
     cat_el = soup.find("div", class_="eventCategory")
     category = cat_el.get_text(strip=True) if cat_el else ""
-
-    # Presenter (appears as a <p> containing "Presenter:")
     presenter = ""
     for p in soup.find_all("p"):
         txt = p.get_text()
@@ -285,8 +279,6 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
             a = p.find("a")
             presenter = a.get_text(strip=True) if a else re.sub(r'Presenter:\s*', '', txt).strip()
             break
-
-    # Description
     desc_el = soup.find("div", class_="eventDescription")
     description = ""
     if desc_el:
@@ -294,13 +286,7 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
             if a["href"].startswith("/"):
                 a["href"] = NHH_BASE + a["href"]
         description = str(desc_el.decode_contents())
-
-    # Event details block
-    time_str = ""
-    when_full = ""
-    address = ""
-    hosted_by = ""
-    contact = ""
+    time_str = when_full = address = hosted_by = contact = ""
     details_el = soup.find("div", class_="eventDetails")
     if details_el:
         for mb in details_el.find_all("div", class_="mb25"):
@@ -320,17 +306,14 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
                 hosted_by = val
             elif label == "Contact Info":
                 contact = paras[1].get_text(", ", strip=True)
-
-    # Extract time portion from "Tuesday, March 24, 2026 2:00pm"
     start_dt_utc = None
     if when_full:
         m = re.search(r'(\d{1,2}:\d{2}\s*[ap]m)', when_full, re.IGNORECASE)
         if m:
             time_str = m.group(1).strip()
-            # Build datetime for gcal
             try:
-                d = event_date or datetime.strptime(when_full.split(time_str)[0].strip(),
-                                                    "%A, %B %d, %Y").date()
+                d = event_date or datetime.strptime(
+                    when_full.split(time_str)[0].strip(), "%A, %B %d, %Y").date()
                 tm = re.match(r'(\d{1,2}):(\d{2})\s*([ap]m)', time_str, re.IGNORECASE)
                 if tm:
                     h, mn = int(tm.group(1)), int(tm.group(2))
@@ -342,23 +325,539 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
                     start_dt_utc = dt_local.astimezone(timezone.utc)
             except (ValueError, AttributeError):
                 pass
-
-    # OG image as fallback
     og_img = soup.find("meta", property="og:image")
     image = og_img.get("content", "") if og_img else ""
-
     return {
-        "title": title,
-        "category": category,
-        "presenter": presenter,
-        "description": description,
-        "time_str": time_str,
-        "address": address,
-        "hosted_by": hosted_by,
-        "contact": contact,
-        "image": image,
+        "title": title, "category": category, "presenter": presenter,
+        "description": description, "time_str": time_str, "address": address,
+        "hosted_by": hosted_by, "contact": contact, "image": image,
         "start_dt": start_dt_utc,
     }
+
+
+# ---------------------------------------------------------------------------
+# Northern Stage scraping
+# ---------------------------------------------------------------------------
+
+def _ns_get_show_urls(html: str) -> list[str]:
+    """Extract show page URLs from the Northern Stage season page."""
+    soup = BeautifulSoup(html, "html.parser")
+    urls = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("/") and not href.startswith("//"):
+            href = NORTHERNSTAGE_BASE + href
+        if not href.startswith(NORTHERNSTAGE_BASE + "/"):
+            continue
+        path = href[len(NORTHERNSTAGE_BASE):].strip("/")
+        # Only root-level slugs (no subdirectories, no query strings)
+        if not path or "/" in path or "?" in path or "#" in path:
+            continue
+        if path.lower() in NORTHERNSTAGE_SKIP_SLUGS:
+            continue
+        if re.match(r'^\d', path):  # skip year-prefixed slugs
+            continue
+        urls.add(NORTHERNSTAGE_BASE + "/" + path + "/")
+    return list(urls)
+
+
+def _ns_parse_show_page(html: str, url: str) -> dict | None:
+    """Parse a Northern Stage show page. Returns None if not a show page."""
+    soup = BeautifulSoup(html, "html.parser")
+    # Dates and title come from og:title: "The Children - Northern Stage - Mar. 25 - Apr. 12, 2026"
+    og_title_tag = soup.find("meta", property="og:title")
+    if not og_title_tag:
+        return None
+    og_title = og_title_tag.get("content", "")
+    m = re.search(r'^(.+?)\s*-\s*Northern Stage\s*-\s*(.+)$', og_title, re.IGNORECASE)
+    if not m:
+        return None
+    title = m.group(1).strip()
+    date_range_raw = m.group(2).strip()
+    dates = _ns_parse_date_range(date_range_raw)
+    if not dates:
+        return None
+    start_date, end_date = dates
+    og_image = soup.find("meta", property="og:image")
+    image = og_image.get("content", "") if og_image else ""
+    og_desc = soup.find("meta", attrs={"name": "description"})
+    description = og_desc.get("content", "") if og_desc else ""
+    # Format date range for display (e.g. "Mar 25 – Apr 12, 2026")
+    date_range_str = _ns_fmt_date_range(start_date, end_date)
+    return {
+        "title": title,
+        "start_date": start_date,
+        "end_date": end_date,
+        "date_range_str": date_range_str,
+        "description": f"<p>{description}</p>" if description else "",
+        "image": image,
+        "url": url,
+        "source": "northernstage",
+    }
+
+
+def _ns_parse_date_range(s: str) -> tuple[date, date] | None:
+    """Parse 'Mar. 25 - Apr. 12, 2026' or 'Mar. 25, 2026 - Apr. 12, 2026'."""
+    s = s.strip()
+    # Remove dots from abbreviated months
+    s = re.sub(r'(\b\w{3})\.', r'\1', s)
+    # Try: "Mar 25 - Apr 12, 2026" (year only on end date)
+    m = re.match(r'(\w{3}\s+\d{1,2})\s*[-–]\s*(\w{3}\s+\d{1,2},?\s+\d{4})', s)
+    if m:
+        try:
+            end_dt = datetime.strptime(m.group(2).replace(',', ''), '%b %d %Y')
+            start_dt = datetime.strptime(f"{m.group(1)} {end_dt.year}", '%b %d %Y')
+            return start_dt.date(), end_dt.date()
+        except ValueError:
+            pass
+    # Try: "Mar 25, 2026 - Apr 12, 2026"
+    m = re.match(r'(\w{3}\s+\d{1,2},?\s+\d{4})\s*[-–]\s*(\w{3}\s+\d{1,2},?\s+\d{4})', s)
+    if m:
+        try:
+            start_dt = datetime.strptime(m.group(1).replace(',', ''), '%b %d %Y')
+            end_dt = datetime.strptime(m.group(2).replace(',', ''), '%b %d %Y')
+            return start_dt.date(), end_dt.date()
+        except ValueError:
+            pass
+    return None
+
+
+def _ns_fmt_date_range(start: date, end: date) -> str:
+    if start.year == end.year:
+        return f"{start.strftime('%b %-d')} – {end.strftime('%b %-d, %Y')}"
+    return f"{start.strftime('%b %-d, %Y')} – {end.strftime('%b %-d, %Y')}"
+
+
+def _theater_show_to_event(show: dict, today: date) -> dict:
+    """Convert a theater production dict to a standard event dict."""
+    start_date = show["start_date"]
+    end_date = show["end_date"]
+    run_days = (end_date - start_date).days + 1
+    return {
+        "id": show["url"],
+        "title": show["title"],
+        "source": show["source"],
+        # Sort by opening night (or today if already running)
+        "date": max(start_date, today),
+        "dates": [max(start_date, today)],
+        "time_str": show["date_range_str"],
+        "location": show.get("location", ""),
+        "description": show.get("description", ""),
+        "image": show.get("image", ""),
+        "url": show["url"],
+        "start_dt": None,  # no specific time → all-day GCal event
+        "duration": f"{run_days} days",
+        "unimportant": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# NL Barn scraping
+# ---------------------------------------------------------------------------
+
+_MONTH_RE = re.compile(
+    r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\b',
+    re.IGNORECASE,
+)
+
+
+def _nlbarn_parse_date(text: str) -> tuple[date | None, str]:
+    """Parse 'Saturday, April 18th at 2pm' → (date, '2pm')."""
+    clean = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', text)
+    m = re.match(r'\w+,\s+(\w+ \d+)\s+at\s+(\d+(?::\d+)?\s*[ap]m)', clean.strip(), re.IGNORECASE)
+    if not m:
+        return None, text.strip()
+    month_day, time_part = m.group(1), m.group(2).strip()
+    for year in [date.today().year, date.today().year + 1]:
+        try:
+            return datetime.strptime(f"{month_day} {year}", "%B %d %Y").date(), time_part
+        except ValueError:
+            continue
+    return None, time_part
+
+
+def _nlbarn_fetch_page(url: str) -> list[dict]:
+    """Scrape NL Barn page for show blocks (h3 title + strong date).
+
+    Squarespace puts h3 and the following strong-date in separate fe-block
+    siblings, so we scan descendants in document order and match each date
+    to the nearest preceding h3.
+    """
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  Warning: could not fetch {url}: {e}", file=sys.stderr)
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Collect (position, tag) for h3s and strong-dates in document order
+    h3_tags: list[tuple[int, object]] = []
+    date_tags: list[tuple[int, object]] = []
+    for i, tag in enumerate(soup.descendants):
+        name = getattr(tag, "name", None)
+        if name == "h3":
+            h3_tags.append((i, tag))
+        elif name == "strong" and _MONTH_RE.search(tag.get_text(strip=True) or ""):
+            date_tags.append((i, tag))
+
+    events = []
+    seen_titles: set[str] = set()
+    for date_pos, date_tag in date_tags:
+        date_text = date_tag.get_text(strip=True)
+        ev_date, time_str = _nlbarn_parse_date(date_text)
+        if not ev_date:
+            continue
+        # Nearest h3 preceding this date tag
+        preceding = [(p, t) for p, t in h3_tags if p < date_pos]
+        if not preceding:
+            continue
+        _, h3_tag = preceding[-1]
+        title = h3_tag.get_text(strip=True)
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+
+        # Walk up from the date tag to find its fe-block, then look for
+        # ticket link, description, image in the surrounding fluid-engine
+        fluid = date_tag.find_parent(class_=re.compile(r'fluid-engine'))
+        container = fluid or date_tag.find_parent("div")
+
+        ticket_url = url
+        description = ""
+        image = ""
+        author = ""
+        if container:
+            a = container.find("a", href=re.compile(r'ovationtix\.com'))
+            if a:
+                ticket_url = a["href"]
+            em = container.find("em")
+            if em:
+                author = em.get_text(strip=True)
+            desc_parts = []
+            for p in container.find_all("p"):
+                t = p.get_text(strip=True)
+                if (t and len(t) > 15
+                        and not _MONTH_RE.search(t)
+                        and "tickets" not in t.lower()
+                        and t != author):
+                    desc_parts.append(f"<p>{t}</p>")
+            if author:
+                desc_parts.insert(0, f"<p><em>{author}</em></p>")
+            description = "\n".join(desc_parts)
+            img = container.find("img")
+            if img:
+                image = img.get("src", "")
+
+        events.append({
+            "id": ticket_url or f"nlbarn_{ev_date.isoformat()}_{title[:20]}",
+            "title": title,
+            "date": ev_date,
+            "time_str": time_str or "",
+            "description": description,
+            "image": image,
+            "url": ticket_url,
+            "location": "Fleming Center, New London",
+            "source": "nlbarn",
+        })
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Shaker Bridge Theatre scraping
+# ---------------------------------------------------------------------------
+
+_SHBT_DATE_RE = re.compile(r'color:\s*#[Ee]21[Cc]21', re.IGNORECASE)
+_SHBT_TITLE_RE = re.compile(r'color:\s*#[Ff]{6}|color:\s*#[Ff][Ff][Ff]\b', re.IGNORECASE)
+
+
+def _shbt_parse_date_range(text: str) -> tuple[date, date] | None:
+    """Parse 'March 26 – April 12, 2026'."""
+    m = re.match(r'(\w+ \d{1,2})\s*[–-]\s*(\w+ \d{1,2},?\s+\d{4})', text.strip())
+    if not m:
+        return None
+    try:
+        end_dt = datetime.strptime(m.group(2).replace(',', '').strip(), '%B %d %Y')
+        start_dt = datetime.strptime(f"{m.group(1)} {end_dt.year}", '%B %d %Y')
+        return start_dt.date(), end_dt.date()
+    except ValueError:
+        return None
+
+
+def _shbt_parse_page(html: str, page_url: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    shows = []
+    seen_titles = set()
+
+    for date_span in soup.find_all("span", style=_SHBT_DATE_RE):
+        date_text = date_span.get_text(strip=True)
+        dates = _shbt_parse_date_range(date_text)
+        if not dates:
+            continue
+        start_date, end_date = dates
+
+        section = date_span.find_parent("section") or date_span.find_parent(
+            class_=re.compile(r'wixui-section'))
+        if not section:
+            continue
+
+        # Title: first white/bold span
+        title = ""
+        for span in section.find_all("span", style=_SHBT_TITLE_RE):
+            t = span.get_text(strip=True)
+            if t and len(t) > 1 and not re.match(r'^\d', t):
+                title = t
+                break
+        if not title:
+            # fallback: font_7 paragraph
+            for p in section.find_all("p", class_=re.compile(r'font_7')):
+                t = p.get_text(strip=True)
+                if t:
+                    title = t
+                    break
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+
+        # Image (wixstatic CDN)
+        image = ""
+        img = section.find("img", src=re.compile(r'wixstatic\.com', re.IGNORECASE))
+        if img:
+            # Prefer srcset for a cleaner URL, else src
+            srcset = img.get("srcset", "")
+            if srcset:
+                image = srcset.split(",")[-1].strip().split()[0]
+            else:
+                image = img.get("src", "")
+
+        # Description: richtext div with the most font_8 paragraphs
+        description = ""
+        best_div = None
+        best_count = 0
+        for div in section.find_all(attrs={"data-testid": "richTextElement"}):
+            paras = div.find_all("p", class_=re.compile(r'font_8'))
+            if len(paras) > best_count:
+                best_count = len(paras)
+                best_div = div
+        if best_div:
+            desc_parts = []
+            for p in best_div.find_all("p", class_=re.compile(r'font_8')):
+                t = p.get_text(strip=True)
+                if t:
+                    desc_parts.append(f"<p>{t}</p>")
+            description = "\n".join(desc_parts)
+
+        # Venue from the page URL
+        location = "Briggs Opera House, West Lebanon" if "shaker" in page_url else "Shaker Bridge Theatre"
+
+        date_range_str = _ns_fmt_date_range(start_date, end_date)
+        shows.append({
+            "title": title,
+            "start_date": start_date,
+            "end_date": end_date,
+            "date_range_str": date_range_str,
+            "description": description,
+            "image": image,
+            "url": SHBT_TICKETS_URL,
+            "location": location,
+            "source": "shakerbridgetheatre",
+        })
+    return shows
+
+
+# ---------------------------------------------------------------------------
+# Movie scraping — Nugget Theaters & Lebanon 6
+# ---------------------------------------------------------------------------
+
+def _movie_event(title: str, ev_date: date, time_str: str, image: str,
+                 url: str, rating: str, runtime: str, description: str,
+                 location: str, source: str) -> dict:
+    desc_parts = []
+    if rating:
+        desc_parts.append(f"Rated {rating}")
+    if runtime:
+        desc_parts.append(runtime)
+    full_desc = (f"<p class='ev-movie-meta'>{'  ·  '.join(desc_parts)}</p>\n" if desc_parts else "") + description
+    return {
+        "id": f"{source}_{ev_date.isoformat()}_{title[:30]}",
+        "title": title,
+        "source": source,
+        "date": ev_date,
+        "dates": [ev_date],
+        "time_str": time_str,
+        "location": location,
+        "description": full_desc,
+        "image": image,
+        "url": url,
+        "start_dt": None,
+        "unimportant": False,
+    }
+
+
+def _nugget_fetch_day(day: date) -> list[dict]:
+    if day == date.today():
+        url = NUGGET_BASE + "/"
+    else:
+        url = f"{NUGGET_BASE}/?moviedate={day.isoformat()}"
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  Warning: Nugget {day}: {e}", file=sys.stderr)
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    events = []
+    for card in soup.find_all("div", class_="movie-now-single"):
+        title_a = card.select_one(".movie-now-title a")
+        if not title_a:
+            continue
+        title = title_a.get_text(strip=True)
+        movie_url = title_a.get("href", "") or NUGGET_TICKETS_URL
+
+        playing_el = card.select_one(".movie-now-playing-today")
+        if not playing_el:
+            continue  # not showing today
+        playing_text = playing_el.get_text(strip=True)
+        m = re.search(r'\bat\s+(.+)$', playing_text, re.IGNORECASE)
+        time_str = m.group(1).replace("|", "·").strip() if m else playing_text
+
+        img = card.select_one(".movie-now-thumb")
+        image = img.get("src", "") if img else ""
+
+        rating_el = card.select_one(".movie-now-rating")
+        rating = rating_el.get_text(strip=True) if rating_el else ""
+
+        runtime_el = card.select_one(".movie-now-time")
+        runtime = runtime_el.get_text(strip=True).replace("Running time ", "") if runtime_el else ""
+
+        desc_el = card.select_one(".movie-now-description")
+        description = str(desc_el.decode_contents()).strip() if desc_el else ""
+
+        events.append(_movie_event(title, day, time_str, image, movie_url,
+                                   rating, runtime, description,
+                                   "Nugget Theater, Hanover", "nugget"))
+    return events
+
+
+def _lebanon6_fetch_day(day: date) -> list[dict]:
+    url = LEBANON6_URL if day == date.today() else f"{LEBANON6_URL}?date={day.isoformat()}"
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  Warning: Lebanon 6 {day}: {e}", file=sys.stderr)
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    events = []
+    for card in soup.find_all("div", class_="cin-movie-card"):
+        h3 = card.find("h3")
+        if not h3:
+            continue
+        title_a = h3.find("a")
+        if not title_a:
+            continue
+        title = title_a.get_text(strip=True)
+        href = title_a.get("href", "")
+        movie_url = (LEBANON6_BASE + href) if href.startswith("/") else href
+
+        # Poster image
+        img = card.find("img")
+        image = img.get("src", "") if img else ""
+
+        # Rating (div with bg-black class) and runtime (text-xs uppercase sibling)
+        body = card.find("div", class_="cin-showtimes-body-container")
+        rating = runtime = ""
+        if body:
+            rating_div = body.find("div", class_=re.compile(r'\bbg-black\b'))
+            if rating_div:
+                rating = rating_div.get_text(strip=True)
+            for div in body.find_all("div", class_=re.compile(r'text-xs')):
+                t = div.get_text(strip=True)
+                if re.match(r'\d+h', t):
+                    runtime = t
+                    break
+
+        # Showtimes — collect all time button links
+        times = []
+        for btn_group in card.find_all("div", class_="cin-showtimes-buttons"):
+            for a in btn_group.find_all("a", href=True):
+                t = a.get_text(strip=True)
+                if t:
+                    times.append(t)
+        if not times:
+            continue
+        time_str = " · ".join(times)
+
+        events.append(_movie_event(title, day, time_str, image, movie_url,
+                                   rating, runtime, "",
+                                   "Lebanon 6 Cinema", "lebanon6"))
+    return events
+
+
+def _dedup_movies(events: list[dict]) -> list[dict]:
+    """Merge per-day movie entries into one entry per film with all dates listed."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for ev in events:
+        groups[ev["title"].lower().strip()].append(ev)
+
+    result = []
+    for group in groups.values():
+        group.sort(key=lambda e: e["dates"][0] if e.get("dates") else date.max)
+        primary = group[0].copy()
+        primary["dates"] = [e["dates"][0] for e in group if e.get("dates")]
+        # Build a per-day schedule block prepended to the description
+        schedule_rows = "".join(
+            f"<tr><td><strong>{e['dates'][0].strftime('%a %b %-d')}</strong></td>"
+            f"<td>{e.get('time_str', '')}</td></tr>"
+            for e in group if e.get("dates") and e.get("time_str")
+        )
+        schedule = f'<table class="movie-schedule">{schedule_rows}</table>' if schedule_rows else ""
+        primary["description"] = schedule + (primary.get("description") or "")
+        primary["time_str"] = ""  # times are now in the schedule table
+        result.append(primary)
+    return result
+
+
+def run_scrape_nugget(today: date, end: date) -> list[dict]:
+    print(f"Fetching Nugget Theater showtimes ({MOVIE_FETCH_DAYS} days)...")
+    events = []
+    days = [today + timedelta(days=i) for i in range(MOVIE_FETCH_DAYS)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for day_events in pool.map(_nugget_fetch_day, days):
+            events.extend(day_events)
+    events = _dedup_movies(events)
+    print(f"Nugget: {len(events)} films")
+    return events
+
+
+def _lebanon6_fetch_synopsis(url: str) -> str:
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        el = soup.select_one(".cin-movie-desc")
+        return el.get_text(strip=True) if el else ""
+    except Exception:
+        return ""
+
+
+def run_scrape_lebanon6(today: date, end: date) -> list[dict]:
+    print(f"Fetching Lebanon 6 showtimes ({MOVIE_FETCH_DAYS} days)...")
+    events = []
+    days = [today + timedelta(days=i) for i in range(MOVIE_FETCH_DAYS)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for day_events in pool.map(_lebanon6_fetch_day, days):
+            events.extend(day_events)
+    events = _dedup_movies(events)
+    print(f"Lebanon 6: fetching synopses for {len(events)} films...")
+    urls = [ev.get("url", "") for ev in events]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        synopses = list(pool.map(_lebanon6_fetch_synopsis, urls))
+    for ev, synopsis in zip(events, synopses):
+        if synopsis:
+            ev["description"] = ev.get("description", "") + f"<p>{synopsis}</p>"
+    print(f"Lebanon 6: {len(events)} films")
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +867,7 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
 def canonical_title(title: str) -> str:
     t = re.sub(r'\s*[-–]\s*[A-Z][A-Za-z]*\.[\w.,\s]+$', '', title)
     t = re.sub(r'\s*[-–]\s*[A-Z][a-z]+\s+[A-Z][a-z]+$', '', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+    return re.sub(r'\s+', ' ', t).strip()
 
 
 def is_unimportant(title: str, audience: str) -> bool:
@@ -384,14 +882,13 @@ def merge_recurring(events: list[dict]) -> list[dict]:
     groups: dict[tuple, list] = defaultdict(list)
     for ev in events:
         key = (
-            canonical_title(ev.get("title") or ev.get("teaser_title", "")).lower(),
+            canonical_title(ev.get("title") or "").lower(),
             (ev.get("time_str") or "").lower(),
             (ev.get("location") or "").lower(),
         )
         groups[key].append(ev)
-
     merged = []
-    for key, group in groups.items():
+    for group in groups.values():
         group.sort(key=lambda e: e.get("date") or date.max)
         primary = group[0].copy()
         primary["dates"] = [e["date"] for e in group if e.get("date")]
@@ -400,7 +897,9 @@ def merge_recurring(events: list[dict]) -> list[dict]:
 
 
 def format_time(time_str: str) -> str:
-    if not time_str or time_str.lower() in ("all day", "add to calendar"):
+    if not time_str or time_str.lower() in ("add to calendar",):
+        return ""
+    if time_str.lower() == "all day":
         return "All day"
     return time_str
 
@@ -434,16 +933,15 @@ def parse_duration_hours(duration_str: str) -> float:
 def event_datetimes(ev: dict, occurrence_date: date) -> tuple[datetime, datetime, bool]:
     start_dt: datetime | None = ev.get("start_dt")
     duration_str = ev.get("duration", "")
-
     if start_dt is None:
         start_utc = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day,
                              tzinfo=timezone.utc)
-        end_utc = start_utc + timedelta(days=1)
+        hours = parse_duration_hours(duration_str)
+        days = max(1, round(hours / 24))
+        end_utc = start_utc + timedelta(days=days)
         return start_utc, end_utc, True
-
     time_str = ev.get("time_str", "") or ""
     is_all_day = (not time_str or time_str.lower() in ("all day", "")) and start_dt.hour < 6
-
     if is_all_day:
         start_utc = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day,
                              tzinfo=timezone.utc)
@@ -451,17 +949,12 @@ def event_datetimes(ev: dict, occurrence_date: date) -> tuple[datetime, datetime
         days = max(1, round(hours / 24))
         end_utc = start_utc + timedelta(days=days)
         return start_utc, end_utc, True
-    else:
-        start_utc = start_dt.replace(
-            year=occurrence_date.year,
-            month=occurrence_date.month,
-            day=occurrence_date.day,
-        )
-        hours = parse_duration_hours(duration_str)
-        if hours >= 20:
-            hours = 1.0
-        end_utc = start_utc + timedelta(hours=hours)
-        return start_utc, end_utc, False
+    start_utc = start_dt.replace(
+        year=occurrence_date.year, month=occurrence_date.month, day=occurrence_date.day)
+    hours = parse_duration_hours(duration_str)
+    if hours >= 20:
+        hours = 1.0
+    return start_utc, start_utc + timedelta(hours=hours), False
 
 
 def gcal_url(ev: dict, occurrence_date: date) -> str:
@@ -470,7 +963,8 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
     location = ev.get("location", "") or ev.get("address", "")
     desc_html = ev.get("description") or ev.get("about") or ""
     _d = re.sub(r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
-                lambda m: f'{m.group(2)} ({m.group(1)})', desc_html, flags=re.IGNORECASE | re.DOTALL)
+                lambda m: f'{m.group(2)} ({m.group(1)})', desc_html,
+                flags=re.IGNORECASE | re.DOTALL)
     _d = re.sub(r'<(?:em|i)>(.*?)</(?:em|i)>', r'_\1_', _d, flags=re.IGNORECASE | re.DOTALL)
     _d = re.sub(r'<br\s*/?>', '\n', _d, flags=re.IGNORECASE)
     _d = re.sub(r'</p>', '\n\n', _d, flags=re.IGNORECASE)
@@ -478,12 +972,8 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
     desc = html_mod.unescape(_d).strip()
     if ev.get("url"):
         desc = (desc + "\n\n" if desc else "") + ev["url"]
-
-    if is_all_day:
-        dates = start_utc.strftime("%Y%m%d") + "/" + end_utc.strftime("%Y%m%d")
-    else:
-        dates = start_utc.strftime("%Y%m%dT%H%M%SZ") + "/" + end_utc.strftime("%Y%m%dT%H%M%SZ")
-
+    dates = (start_utc.strftime("%Y%m%d") + "/" + end_utc.strftime("%Y%m%d") if is_all_day
+             else start_utc.strftime("%Y%m%dT%H%M%SZ") + "/" + end_utc.strftime("%Y%m%dT%H%M%SZ"))
     params = {"action": "TEMPLATE", "text": title, "dates": dates}
     if location:
         params["location"] = location
@@ -496,8 +986,20 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
 # HTML generation
 # ---------------------------------------------------------------------------
 
+SOURCE_META = {
+    "dartmouth":          {"label": "Dartmouth",       "group": "dartmouth"},
+    "nhhumanities":       {"label": "NH Humanities",   "group": "nhhumanities"},
+    "northernstage":      {"label": "Northern Stage",  "group": "theater"},
+    "nlbarn":             {"label": "NL Barn",          "group": "theater"},
+    "shakerbridgetheatre":{"label": "Shaker Bridge",   "group": "theater"},
+    "nugget":             {"label": "Nugget Theater",   "group": "movies"},
+    "lebanon6":           {"label": "Lebanon 6",        "group": "movies"},
+}
+
+
 def generate_html(events: list[dict], start: date, end: date) -> str:
-    sources_present = sorted({ev.get("source", "dartmouth") for ev in events})
+    sources_present = {ev.get("source", "dartmouth") for ev in events}
+    groups_present = {SOURCE_META[s]["group"] for s in sources_present if s in SOURCE_META}
 
     by_date: dict[date, list] = defaultdict(list)
     for ev in events:
@@ -513,19 +1015,22 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 
     def render_event(ev: dict) -> str:
         source = ev.get("source", "dartmouth")
-        title = ev.get("title") or ev.get("teaser_title", "Untitled")
+        title = ev.get("title") or "Untitled"
         unimportant = ev.get("unimportant", False)
-        open_attr = "" if unimportant else " open"
+
+        far_away = False
+        if source == "nhhumanities":
+            loc = ev.get("location", "") or ev.get("address", "") or ""
+            far_away = not any(town.lower() in loc.lower() for town in NHH_NEARBY_TOWNS)
+
+        open_attr = "" if (unimportant or far_away) else " open"
         cls = f"event source-{source}"
-        if unimportant:
-            cls += " unimportant"
-        else:
-            cls += " important"
+        cls += " unimportant" if unimportant else " important"
+        if far_away:
+            cls += " far-away"
 
         time_display = format_time(ev.get("time_str", ""))
         location = ev.get("location", "") or ev.get("address", "")
-        audience = ev.get("audience", "")
-        sponsor = ev.get("sponsor", "")
         description = ev.get("description", "")
         about = ev.get("about", "")
         image = ev.get("image", "")
@@ -546,13 +1051,14 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 
         meta_parts = []
         if source == "dartmouth":
+            audience = ev.get("audience", "")
             if audience and audience.lower() != "public":
                 meta_parts.append(f'<span class="chip chip-audience">{audience}</span>')
-            if sponsor:
-                meta_parts.append(f'<span class="chip chip-sponsor">{sponsor}</span>')
+            if ev.get("sponsor"):
+                meta_parts.append(f'<span class="chip chip-sponsor">{ev["sponsor"]}</span>')
             if ev.get("contact"):
                 meta_parts.append(f'<span class="chip chip-contact">{ev["contact"]}</span>')
-        else:  # nhhumanities
+        elif source == "nhhumanities":
             if ev.get("category"):
                 meta_parts.append(f'<span class="chip chip-category">{ev["category"]}</span>')
             if ev.get("presenter"):
@@ -566,18 +1072,27 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
         img_html = f'<img class="ev-image" src="{image}" alt="">' if image else ""
         link_html = f'<a class="ev-link" href="{url}" target="_blank">Full details ↗</a>' if url else ""
 
+        trailer_html = ""
+        if source in MOVIE_SOURCES:
+            trailer_q = quote_plus(f"{title} official trailer")
+            trailer_html = (f'<a class="ev-link trailer-link" '
+                            f'href="https://www.youtube.com/results?search_query={trailer_q}" '
+                            f'target="_blank">Trailer ▶</a>')
+
         gcal_parts = []
         for d in dates:
             label = fmt_date_short(d) if len(dates) > 1 else "Add to Google Calendar"
             gcal_parts.append(
                 f'<a class="gcal-btn" href="{gcal_url(ev, d)}" target="_blank">'
-                f'<svg viewBox="0 0 24 24" width="13" height="13"><path d="M19 4h-1V2h-2v2H8V2H6v2H5C3.9 4 3 4.9 3 6v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11zM7 11h5v5H7z" fill="currentColor"/></svg>'
-                f' {label}</a>'
+                f'<svg viewBox="0 0 24 24" width="13" height="13"><path d="M19 4h-1V2h-2v2H8V2H6v2H5'
+                f'C3.9 4 3 4.9 3 6v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14'
+                f'v11zM7 11h5v5H7z" fill="currentColor"/></svg> {label}</a>'
             )
         gcal_html = f'<div class="gcal-row">{"".join(gcal_parts)}</div>'
 
         badge = ""
         if unimportant and source == "dartmouth":
+            audience = ev.get("audience", "")
             reasons = []
             if UNIMPORTANT_KEYWORDS.search(title):
                 reasons.append("academic")
@@ -586,12 +1101,12 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
             badge = f'<span class="badge">{" · ".join(reasons)}</span>' if reasons else ""
 
         virtual_badge = f'<span class="virtual-badge">{virtual}</span>' if virtual else ""
-
-        source_label = "Dartmouth" if source == "dartmouth" else "NH Humanities"
+        source_label = SOURCE_META.get(source, {}).get("label", source)
         source_pip = f'<span class="source-pip source-pip-{source}" title="{source_label}"></span>'
 
+        ev_id = re.sub(r'[^\w-]', '_', ev.get("id", ""))
         return f'''
-  <details{open_attr} class="{cls}">
+  <details{open_attr} class="{cls}" id="{ev_id}">
     <summary>
       {source_pip}
       <span class="ev-time">{time_display}</span>
@@ -604,13 +1119,12 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       {dates_html}
       {desc_html}
       {meta_html}
-      <div class="ev-actions">{link_html}{gcal_html}</div>
+      <div class="ev-actions">{link_html}{trailer_html}{gcal_html}</div>
     </div>
   </details>'''
 
     sections = []
-    total = 0
-    important_count = 0
+    total = important_count = 0
     for d in sorted(by_date.keys()):
         day_events = sorted(by_date[d], key=sort_key)
         sections.append(f'\n  <h2 class="date-header">{fmt_date_header(d)}</h2>')
@@ -619,18 +1133,23 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
             total += 1
             if not ev.get("unimportant"):
                 important_count += 1
-
     body = "\n".join(sections)
 
-    # Build filter bar (only if multiple sources)
-    filter_html = ""
-    if len(sources_present) > 1:
-        btns = ['<button class="filter-btn active" onclick="filterSource(\'all\', this)">All</button>']
-        if "dartmouth" in sources_present:
-            btns.append('<button class="filter-btn" onclick="filterSource(\'dartmouth\', this)">Dartmouth</button>')
-        if "nhhumanities" in sources_present:
-            btns.append('<button class="filter-btn" onclick="filterSource(\'nhhumanities\', this)">NH Humanities</button>')
-        filter_html = f'<div class="filter-bar">{"".join(btns)}</div>'
+    # Filter bar
+    filter_btns = ['<button class="filter-btn active" data-group="all" onclick="filterEvents(\'all\', this)">All</button>']
+    if "dartmouth" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="dartmouth" onclick="filterEvents(\'dartmouth\', this)">Dartmouth</button>')
+    if "nhhumanities" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="nhhumanities" onclick="filterEvents(\'nhhumanities\', this)">NH Humanities</button>')
+    if "theater" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="theater" onclick="filterEvents(\'theater\', this)">Theater</button>')
+    if "movies" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="movies" onclick="filterEvents(\'movies\', this)">Movies</button>')
+    filter_html = f'<div class="filter-bar">{"".join(filter_btns)}</div>'
 
     css = """
     :root {
@@ -662,16 +1181,26 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --gcal-hover:     #1e3a6e;
       --title-important:   #ffffff;
       --title-unimportant: #777;
-      --pip-dartmouth:  #4ade80;
-      --pip-nhh:        #38bdf8;
-      --surf-dartmouth: #1e1e1e;
-      --surf-nhh:       #131f2e;
-      --bord-dartmouth: #333;
-      --bord-nhh:       #1a3048;
+      --virtual-bg:     #1a3a1a; --virtual-fg: #86efac;
       --filter-bg:      #252525;
       --filter-active-bg: #2a4a8a;
       --filter-active-fg: #fff;
-      --virtual-bg:     #1a3a1a; --virtual-fg: #86efac;
+
+      /* Source surfaces */
+      --surf-dartmouth:          #1e1e1e; --bord-dartmouth:          #333;
+      --pip-dartmouth:           #4ade80;
+      --surf-nhhumanities:       #131f2e; --bord-nhhumanities:       #1a3048;
+      --pip-nhhumanities:        #38bdf8;
+      --surf-northernstage:      #1f1700; --bord-northernstage:      #3d2e00;
+      --pip-northernstage:       #fbbf24;
+      --surf-nlbarn:             #1a1200; --bord-nlbarn:             #332200;
+      --pip-nlbarn:              #fb923c;
+      --surf-shakerbridgetheatre:#200a00; --bord-shakerbridgetheatre:#3d1500;
+      --pip-shakerbridgetheatre: #f87171;
+      --surf-nugget:             #080d1a; --bord-nugget:             #1a2a40;
+      --pip-nugget:              #60a5fa;
+      --surf-lebanon6:           #0d0818; --bord-lebanon6:           #2a1a3a;
+      --pip-lebanon6:            #c084fc;
     }
     body.light {
       --bg:             #f5f5f5;
@@ -702,193 +1231,127 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --gcal-hover:     #3367d6;
       --title-important:   #111;
       --title-unimportant: #999;
-      --pip-dartmouth:  #00693e;
-      --pip-nhh:        #0284c7;
-      --surf-dartmouth: #fff;
-      --surf-nhh:       #f0f8ff;
-      --bord-dartmouth: #ddd;
-      --bord-nhh:       #bfdbfe;
+      --virtual-bg:     #d1fae5; --virtual-fg: #065f46;
       --filter-bg:      #eee;
       --filter-active-bg: #4285f4;
       --filter-active-fg: #fff;
-      --virtual-bg:     #d1fae5; --virtual-fg: #065f46;
+
+      --surf-dartmouth:          #fff;    --bord-dartmouth:          #ddd;
+      --pip-dartmouth:           #00693e;
+      --surf-nhhumanities:       #f0f8ff; --bord-nhhumanities:       #bfdbfe;
+      --pip-nhhumanities:        #0284c7;
+      --surf-northernstage:      #fffbeb; --bord-northernstage:      #fde68a;
+      --pip-northernstage:       #d97706;
+      --surf-nlbarn:             #fff7ed; --bord-nlbarn:             #fed7aa;
+      --pip-nlbarn:              #ea580c;
+      --surf-shakerbridgetheatre:#fff5f5; --bord-shakerbridgetheatre:#fecaca;
+      --pip-shakerbridgetheatre: #dc2626;
+      --surf-nugget:             #eff6ff; --bord-nugget:             #bfdbfe;
+      --pip-nugget:              #2563eb;
+      --surf-lebanon6:           #faf5ff; --bord-lebanon6:           #e9d5ff;
+      --pip-lebanon6:            #9333ea;
     }
 
     * { box-sizing: border-box; }
+    html, body { overflow-x: hidden; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      max-width: 860px;
-      margin: 0 auto;
-      padding: 1rem 1.5rem 4rem;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.5;
+      max-width: 860px; margin: 0 auto; padding: 1rem 1.5rem 4rem;
+      background: var(--bg); color: var(--text); line-height: 1.5;
       transition: background 0.2s, color 0.2s;
     }
     .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
     h1 { font-size: 1.8rem; margin-bottom: 0.25rem; color: var(--green); }
     .subtitle { color: var(--text-muted); margin-bottom: 0.75rem; font-size: 0.95rem; }
     .subtitle a { color: var(--green); }
-    .stats { background: var(--green-bg); border-left: 4px solid var(--green); padding: 0.6rem 1rem;
-             margin-bottom: 1rem; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
-
-    .filter-bar {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 1.5rem;
-      flex-wrap: wrap;
-    }
+    .stats { background: var(--green-bg); border-left: 4px solid var(--green);
+             padding: 0.6rem 1rem; margin-bottom: 1rem;
+             border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+    .filter-bar { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
     .filter-btn {
-      padding: 0.35rem 0.9rem;
-      border-radius: 20px;
-      border: 1px solid var(--border);
-      background: var(--filter-bg);
-      color: var(--text-muted);
-      cursor: pointer;
-      font-size: 0.85rem;
+      padding: 0.35rem 0.9rem; border-radius: 20px; border: 1px solid var(--border);
+      background: var(--filter-bg); color: var(--text-muted); cursor: pointer; font-size: 0.85rem;
     }
     .filter-btn:hover { border-color: var(--green); color: var(--green); }
     .filter-btn.active { background: var(--filter-active-bg); color: var(--filter-active-fg); border-color: transparent; }
-
     #theme-btn {
-      font-size: 0.8rem;
-      padding: 0.3rem 0.75rem;
-      border-radius: 5px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-      cursor: pointer;
-      white-space: nowrap;
-      flex-shrink: 0;
+      font-size: 0.8rem; padding: 0.3rem 0.75rem; border-radius: 5px;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      cursor: pointer; white-space: nowrap; flex-shrink: 0;
     }
     #theme-btn:hover { border-color: var(--green); color: var(--green); }
-
     h2.date-header {
-      font-size: 1.1rem;
-      font-weight: 700;
-      color: var(--green);
-      margin: 2rem 0 0.5rem;
-      padding: 0.4rem 0;
+      font-size: 1.1rem; font-weight: 700; color: var(--green);
+      margin: 2rem 0 0.5rem; padding: 0.4rem 0;
       border-bottom: 2px solid var(--green);
-      position: sticky;
-      top: 0;
-      background: var(--bg);
-      z-index: 10;
+      position: sticky; top: 0; background: var(--bg); z-index: 10;
     }
-
     details.event {
-      margin: 0.35rem 0;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      transition: box-shadow 0.15s;
+      margin: 0.35rem 0; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface); transition: box-shadow 0.15s;
     }
     details.event[open] { box-shadow: 0 2px 8px var(--shadow); }
-
-    details.source-dartmouth {
-      background: var(--surf-dartmouth);
-      border-color: var(--bord-dartmouth);
-    }
-    details.source-nhhumanities {
-      background: var(--surf-nhh);
-      border-color: var(--bord-nhh);
-    }
+    details.source-dartmouth           { background: var(--surf-dartmouth);           border-color: var(--bord-dartmouth); }
+    details.source-nhhumanities        { background: var(--surf-nhhumanities);        border-color: var(--bord-nhhumanities); }
+    details.source-northernstage       { background: var(--surf-northernstage);       border-color: var(--bord-northernstage); }
+    details.source-nlbarn              { background: var(--surf-nlbarn);              border-color: var(--bord-nlbarn); }
+    details.source-shakerbridgetheatre { background: var(--surf-shakerbridgetheatre); border-color: var(--bord-shakerbridgetheatre); }
+    details.source-nugget              { background: var(--surf-nugget);              border-color: var(--bord-nugget); }
+    details.source-lebanon6            { background: var(--surf-lebanon6);            border-color: var(--bord-lebanon6); }
     details.event.unimportant { opacity: 0.85; }
     details.event.unimportant[open] { opacity: 1; }
-
+    details.event.far-away { opacity: 0.6; }
+    details.event.far-away[open] { opacity: 0.85; }
+    .far-away .ev-title { color: var(--title-unimportant); }
     summary {
-      padding: 0.6rem 1rem;
-      cursor: pointer;
-      display: flex;
-      align-items: baseline;
-      gap: 0.6rem;
-      flex-wrap: wrap;
-      list-style: none;
-      user-select: text;
+      padding: 0.6rem 1rem; cursor: pointer; display: flex; align-items: baseline;
+      gap: 0.6rem; flex-wrap: wrap; list-style: none; user-select: text;
     }
     summary::-webkit-details-marker { display: none; }
     summary::before {
-      content: "▶";
-      font-size: 0.6rem;
-      color: var(--arrow);
-      flex-shrink: 0;
-      align-self: center;
-      transition: transform 0.15s;
+      content: "▶"; font-size: 0.6rem; color: var(--arrow);
+      flex-shrink: 0; align-self: center; transition: transform 0.15s;
     }
     details[open] > summary::before { transform: rotate(90deg); }
-
     .source-pip {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      align-self: center;
-      display: inline-block;
+      width: 8px; height: 8px; border-radius: 50%;
+      flex-shrink: 0; align-self: center; display: inline-block;
     }
-    .source-pip-dartmouth { background: var(--pip-dartmouth); }
-    .source-pip-nhhumanities { background: var(--pip-nhh); }
-
-    .ev-time {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--text-muted);
-      white-space: nowrap;
-      min-width: 90px;
-    }
-    .ev-title {
-      font-weight: 600;
-      font-size: 0.95rem;
-      flex: 1;
-    }
-    .important .ev-title { color: var(--title-important); }
+    .source-pip-dartmouth           { background: var(--pip-dartmouth); }
+    .source-pip-nhhumanities        { background: var(--pip-nhhumanities); }
+    .source-pip-northernstage       { background: var(--pip-northernstage); }
+    .source-pip-nlbarn              { background: var(--pip-nlbarn); }
+    .source-pip-shakerbridgetheatre { background: var(--pip-shakerbridgetheatre); }
+    .source-pip-nugget              { background: var(--pip-nugget); }
+    .source-pip-lebanon6            { background: var(--pip-lebanon6); }
+    .ev-movie-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.4rem; }
+    .movie-schedule { font-size: 0.82rem; border-collapse: collapse; margin-bottom: 0.6rem; }
+    .movie-schedule td { padding: 0.1rem 0.8rem 0.1rem 0; vertical-align: top; }
+    .movie-schedule td:first-child { white-space: nowrap; color: var(--text-muted); }
+    .ev-time { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); white-space: nowrap; min-width: 90px; }
+    .ev-title { font-weight: 600; font-size: 0.95rem; flex: 1; }
+    .important .ev-title   { color: var(--title-important); }
     .unimportant .ev-title { color: var(--title-unimportant); }
-    .ev-location {
-      font-size: 0.8rem;
-      color: var(--text-dim);
-      font-style: italic;
-    }
-    .badge, .virtual-badge {
-      font-size: 0.7rem;
-      border-radius: 3px;
-      padding: 0.1rem 0.4rem;
-      white-space: nowrap;
-    }
-    .badge { background: var(--badge-bg); color: var(--badge-color); }
+    .ev-location { font-size: 0.8rem; color: var(--text-dim); font-style: italic; }
+    .badge, .virtual-badge { font-size: 0.7rem; border-radius: 3px; padding: 0.1rem 0.4rem; white-space: nowrap; }
+    .badge         { background: var(--badge-bg); color: var(--badge-color); }
     .virtual-badge { background: var(--virtual-bg); color: var(--virtual-fg); }
-
     .ev-body {
       padding: 0.75rem 1rem 1rem 2.5rem;
       border-top: 1px solid var(--border-body);
       overflow: hidden;
     }
-    .ev-image {
-      float: right;
-      max-width: 160px;
-      border-radius: 4px;
-      margin: 0 0 0.5rem 1rem;
-    }
+    .ev-image { float: right; max-width: 160px; border-radius: 4px; margin: 0 0 0.5rem 1rem; }
     .ev-dates {
-      font-size: 0.82rem;
-      background: var(--dates-bg);
+      font-size: 0.82rem; background: var(--dates-bg);
       border-left: 3px solid var(--dates-border);
-      padding: 0.3rem 0.6rem;
-      margin-bottom: 0.75rem;
-      border-radius: 0 4px 4px 0;
+      padding: 0.3rem 0.6rem; margin-bottom: 0.75rem; border-radius: 0 4px 4px 0;
     }
-    .ev-description {
-      font-size: 0.88rem;
-      color: var(--text-desc);
-      margin-bottom: 0.75rem;
-      clear: both;
-    }
+    .ev-description { font-size: 0.88rem; color: var(--text-desc); margin-bottom: 0.75rem; clear: both; }
     .ev-description p { margin: 0.4rem 0; }
     .ev-description a { color: var(--green); }
     .ev-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
-    .chip {
-      font-size: 0.75rem;
-      padding: 0.2rem 0.5rem;
-      border-radius: 12px;
-    }
+    .chip { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 12px; max-width: min(100%, 28ch); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .chip-audience  { background: var(--chip-aud-bg); color: var(--chip-aud-fg); }
     .chip-sponsor   { background: var(--chip-spo-bg); color: var(--chip-spo-fg); }
     .chip-contact   { background: var(--chip-con-bg); color: var(--chip-con-fg); }
@@ -896,25 +1359,13 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     .chip-presenter { background: var(--chip-pre-bg); color: var(--chip-pre-fg); }
     .chip-hostedby  { background: var(--chip-hby-bg); color: var(--chip-hby-fg); }
     .ev-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.5rem; }
-    .ev-link {
-      font-size: 0.8rem;
-      color: var(--green);
-      text-decoration: none;
-      font-weight: 500;
-    }
+    .ev-link { font-size: 0.8rem; color: var(--green); text-decoration: none; font-weight: 500; }
     .ev-link:hover { text-decoration: underline; }
     .gcal-row { display: flex; flex-wrap: wrap; gap: 0.4rem; }
     .gcal-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.55rem;
-      border-radius: 4px;
-      background: var(--gcal-bg);
-      color: #fff;
-      text-decoration: none;
-      white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-size: 0.75rem; padding: 0.25rem 0.55rem; border-radius: 4px;
+      background: var(--gcal-bg); color: #fff; text-decoration: none; white-space: nowrap;
     }
     .gcal-btn:hover { background: var(--gcal-hover); }
     @media (max-width: 600px) {
@@ -925,10 +1376,18 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     """
 
     source_links = {
-        "dartmouth": '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
-        "nhhumanities": '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
+        "dartmouth":           '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
+        "nhhumanities":        '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
+        "northernstage":       '<a href="https://northernstage.org">northernstage.org</a>',
+        "nlbarn":              '<a href="https://www.nlbarn.org">nlbarn.org</a>',
+        "shakerbridgetheatre": '<a href="https://www.shakerbridgetheatre.org">shakerbridgetheatre.org</a>',
+        "nugget":              '<a href="https://www.nugget-theaters.com">nugget-theaters.com</a>',
+        "lebanon6":            '<a href="https://www.entertainmentcinemas.com/lebanon-6">entertainmentcinemas.com/lebanon-6</a>',
     }
-    subtitle_parts = " · ".join(source_links[s] for s in sources_present if s in source_links)
+    subtitle_parts = " · ".join(
+        source_links[s] for s in ALL_SOURCES if s in sources_present and s in source_links)
+
+    source_groups_js = json.dumps({k: v for k, v in SOURCE_GROUPS.items() if k != "all"})
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -936,6 +1395,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Upper Valley Events – {start.strftime("%b %-d")} to {end.strftime("%b %-d, %Y")}</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%232d5a27'/><polygon points='16,3 28,22 4,22' fill='%231a3d16'/><polygon points='10,12 20,26 0,26' fill='%232d5a27'/><polygon points='22,14 30,26 14,26' fill='%23234820'/><rect x='14' y='22' width='4' height='6' fill='%235c3d1e'/></svg>">
   <style>{css}</style>
 </head>
 <body>
@@ -945,17 +1405,54 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
   </div>
   <p class="subtitle">Scraped from {subtitle_parts}</p>
   <div class="stats">
-    Showing <strong>{total}</strong> events ({important_count} open, {total - important_count} collapsed)
+    <span id="stats-counts"></span>
     from <strong>{start.strftime("%B %-d")}</strong> to <strong>{end.strftime("%B %-d, %Y")}</strong>.
   </div>
   {filter_html}
   {body}
 <script>
-  function filterSource(src, btn) {{
+  const SOURCE_GROUPS = {source_groups_js};
+
+  // --- Hash helpers ---
+  function parseHash() {{
+    const params = {{}};
+    location.hash.slice(1).split('&').forEach(part => {{
+      const eq = part.indexOf('=');
+      if (eq > 0) params[decodeURIComponent(part.slice(0, eq))] = decodeURIComponent(part.slice(eq + 1));
+    }});
+    return params;
+  }}
+  function updateHash(params) {{
+    const h = Object.entries(params).filter(([,v]) => v)
+      .map(([k,v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+    history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+  }}
+
+  // --- Stats ---
+  function updateStats() {{
+    let total = 0, open = 0, collapsed = 0;
+    document.querySelectorAll('details.event').forEach(el => {{
+      if (el.style.display === 'none') return;
+      total++;
+      if (el.classList.contains('important') && !el.classList.contains('far-away')) open++;
+      else collapsed++;
+    }});
+    document.getElementById('stats-counts').innerHTML =
+      `Showing <strong>${{total}}</strong> events (${{open}} open, ${{collapsed}} collapsed) `;
+  }}
+
+  // --- Filter ---
+  function filterEvents(group, btn, skipHash) {{
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     document.querySelectorAll('details.event').forEach(el => {{
-      el.style.display = (src === 'all' || el.classList.contains('source-' + src)) ? '' : 'none';
+      let show = group === 'all';
+      if (!show && SOURCE_GROUPS[group]) {{
+        show = SOURCE_GROUPS[group].some(s => el.classList.contains('source-' + s));
+      }} else if (!show) {{
+        show = el.classList.contains('source-' + group);
+      }}
+      el.style.display = show ? '' : 'none';
     }});
     document.querySelectorAll('h2.date-header').forEach(h => {{
       let sib = h.nextElementSibling, visible = false;
@@ -965,7 +1462,36 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       }}
       h.style.display = visible ? '' : 'none';
     }});
+    if (!skipHash) {{
+      const p = parseHash();
+      p.filter = group === 'all' ? '' : group;
+      updateHash(p);
+    }}
+    updateStats();
   }}
+
+  // --- Scroll tracking ---
+  function topVisibleEvent() {{
+    for (const el of document.querySelectorAll('details.event')) {{
+      if (el.style.display === 'none') continue;
+      if (el.getBoundingClientRect().bottom > 10) return el;
+    }}
+    return null;
+  }}
+  let scrollTimer;
+  window.addEventListener('scroll', () => {{
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {{
+      const el = topVisibleEvent();
+      if (el) {{
+        const p = parseHash();
+        p.ev = el.id;
+        updateHash(p);
+      }}
+    }}, 150);
+  }}, {{passive: true}});
+
+  // --- Theme ---
   function toggleTheme() {{
     const light = document.body.classList.toggle('light');
     document.getElementById('theme-btn').textContent = light ? '🌙 Dark mode' : '☀ Light mode';
@@ -975,6 +1501,21 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     document.body.classList.add('light');
     document.getElementById('theme-btn').textContent = '🌙 Dark mode';
   }}
+
+  // --- Restore from hash on load ---
+  (function() {{
+    const p = parseHash();
+    if (p.filter) {{
+      const btn = document.querySelector(`.filter-btn[data-group="${{p.filter}}"]`);
+      if (btn) filterEvents(p.filter, btn, true);
+    }} else {{
+      updateStats();
+    }}
+    if (p.ev) {{
+      const el = document.getElementById(p.ev);
+      if (el) setTimeout(() => el.scrollIntoView({{block: 'start'}}), 50);
+    }}
+  }})();
 </script>
 </body>
 </html>"""
@@ -1028,14 +1569,12 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
     list_html = fetch_event_list(today, end)
     raw_events = parse_event_list(list_html, today.year)
     print(f"Found {len(raw_events)} Dartmouth event entries in listing")
-
     seen_ids: dict[str, dict] = {}
     for ev in raw_events:
         if ev["id"] not in seen_ids:
             seen_ids[ev["id"]] = ev
     unique_ids = list(seen_ids.keys())
     print(f"Fetching details for {len(unique_ids)} unique Dartmouth events...")
-
     details: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(fetch_detail, eid): eid for eid in unique_ids}
@@ -1048,85 +1587,154 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
             if done % 20 == 0:
                 print(f"  {done}/{len(unique_ids)} details fetched...")
     print(f"Successfully fetched {len(details)} Dartmouth detail pages")
-
     combined = []
     for ev in raw_events:
-        eid = ev["id"]
-        det = details.get(eid, {})
+        det = details.get(ev["id"], {})
         merged = {**ev}
         if det:
-            merged["title"] = det.get("title") or ev["title"]
-            merged["time_str"] = det.get("time_str") or ev["time_str"]
-            merged["location"] = det.get("location", "")
-            merged["audience"] = det.get("audience", "")
-            merged["sponsor"] = det.get("sponsor", "")
-            merged["description"] = det.get("description", "")
-            merged["about"] = det.get("about", "")
-            merged["image"] = det.get("image", "")
-            merged["url"] = det.get("url", "")
-            merged["contact"] = det.get("contact", "")
-            merged["start_dt"] = det.get("start_dt")
-            merged["start_iso"] = det.get("start_iso", "")
-            merged["duration"] = det.get("duration", "")
+            merged.update({
+                "title":    det.get("title") or ev["title"],
+                "time_str": det.get("time_str") or ev["time_str"],
+                "location": det.get("location", ""),
+                "audience": det.get("audience", ""),
+                "sponsor":  det.get("sponsor", ""),
+                "description": det.get("description", ""),
+                "about":    det.get("about", ""),
+                "image":    det.get("image", ""),
+                "url":      det.get("url", ""),
+                "contact":  det.get("contact", ""),
+                "start_dt": det.get("start_dt"),
+                "start_iso":det.get("start_iso", ""),
+                "duration": det.get("duration", ""),
+            })
         combined.append(merged)
-
     merged_events = merge_recurring(combined)
     print(f"After merging recurring: {len(merged_events)} distinct Dartmouth events")
-
     for ev in merged_events:
         ev["unimportant"] = is_unimportant(ev.get("title", ""), ev.get("audience", ""))
-
-    unimportant_count = sum(1 for e in merged_events if e["unimportant"])
-    print(f"Dartmouth — Important: {len(merged_events) - unimportant_count}, Unimportant: {unimportant_count}")
+    uc = sum(1 for e in merged_events if e["unimportant"])
+    print(f"Dartmouth — Important: {len(merged_events) - uc}, Unimportant: {uc}")
     return merged_events
 
 
 def run_scrape_nhhumanities(today: date, end: date) -> list[dict]:
     raw_events = fetch_nhh_event_list()
     print(f"Found {len(raw_events)} NH Humanities events total")
-
     raw_events = [e for e in raw_events if e.get("date") and today <= e["date"] <= end]
     print(f"Filtered to {len(raw_events)} NH Humanities events in next 30 days")
-
     print(f"Fetching details for {len(raw_events)} NH Humanities events...")
     details: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(fetch_nhh_detail, ev["url"]): ev for ev in raw_events}
-        done = 0
         for future in as_completed(futures):
             ev = futures[future]
             url, detail_html = future.result()
-            done += 1
             if detail_html:
                 details[url] = parse_nhh_detail(detail_html, ev.get("date"))
     print(f"Successfully fetched {len(details)} NH Humanities detail pages")
-
     combined = []
     for ev in raw_events:
         det = details.get(ev["url"], {})
         merged = {**ev}
         if det:
-            merged["title"] = det.get("title") or ev["title"]
-            merged["description"] = det.get("description", "")
-            merged["time_str"] = det.get("time_str", "")
-            merged["start_dt"] = det.get("start_dt")
+            merged.update({
+                "title":       det.get("title") or ev["title"],
+                "description": det.get("description", ""),
+                "time_str":    det.get("time_str", ""),
+                "start_dt":    det.get("start_dt"),
+                "presenter":   det.get("presenter", ""),
+                "hosted_by":   det.get("hosted_by", ""),
+                "contact":     det.get("contact", ""),
+                "category":    det.get("category", ""),
+            })
             if det.get("address"):
                 merged["location"] = det["address"]
-            merged["presenter"] = det.get("presenter", "")
-            merged["hosted_by"] = det.get("hosted_by", "")
-            merged["contact"] = det.get("contact", "")
-            merged["category"] = det.get("category", "")
             if det.get("image"):
                 merged["image"] = det["image"]
         merged["dates"] = [ev["date"]] if ev.get("date") else []
         merged["unimportant"] = False
         combined.append(merged)
-
     print(f"NH Humanities: {len(combined)} events")
     return combined
 
 
-def run_generate(sources: list[str], today: date, end: date) -> None:
+def run_scrape_northernstage(today: date, end: date) -> list[dict]:
+    print("Fetching Northern Stage season page...")
+    resp = requests.get(NORTHERNSTAGE_SEASON_URL, headers=BROWSER_HEADERS, timeout=30)
+    resp.raise_for_status()
+    show_urls = _ns_get_show_urls(resp.text)
+    print(f"Found {len(show_urls)} candidate Northern Stage show URLs")
+
+    shows = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(requests.get, url,
+                               **{"headers": BROWSER_HEADERS, "timeout": 30}): url
+                   for url in show_urls}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                r = future.result()
+                if r.status_code == 200:
+                    show = _ns_parse_show_page(r.text, url)
+                    if show:
+                        shows.append(show)
+            except Exception as e:
+                print(f"  Warning: {url}: {e}", file=sys.stderr)
+
+    # Filter to shows whose run overlaps with our window
+    events = []
+    for show in shows:
+        if show["end_date"] < today or show["start_date"] > end:
+            continue
+        events.append(_theater_show_to_event(show, today))
+
+    print(f"Northern Stage: {len(events)} shows in window")
+    return events
+
+
+def run_scrape_nlbarn(today: date, end: date) -> list[dict]:
+    print("Fetching NL Barn National Theatre Live page...")
+    raw = _nlbarn_fetch_page(NLBARN_NTL_URL)
+    # Filter to window
+    events = []
+    for ev in raw:
+        d = ev.get("date")
+        if d and today <= d <= end:
+            ev["dates"] = [d]
+            ev["unimportant"] = False
+            events.append(ev)
+    print(f"NL Barn: {len(events)} events in window")
+    return events
+
+
+def run_scrape_shakerbridgetheatre(today: date, end: date) -> list[dict]:
+    print("Fetching Shaker Bridge Theatre season pages...")
+    shows = []
+    for url in [SHBT_SEASON_URL, SHBT_BRIDGE_URL]:
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            shows.extend(_shbt_parse_page(resp.text, url))
+        except Exception as e:
+            print(f"  Warning: could not fetch {url}: {e}", file=sys.stderr)
+
+    events = []
+    seen = set()
+    for show in shows:
+        if show["end_date"] < today or show["start_date"] > end:
+            continue
+        key = show["title"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(_theater_show_to_event(show, today))
+
+    print(f"Shaker Bridge: {len(events)} shows in window")
+    return events
+
+
+def run_generate(sources: list[str], today: date, end: date,
+                 final_output: str | None = None) -> None:
     all_events = []
     starts, ends = [], []
     for source in sources:
@@ -1134,17 +1742,18 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
         all_events.extend(events)
         starts.append(s)
         ends.append(e)
-
-    start = min(starts)
-    end = max(ends)
-
     os.makedirs("output", exist_ok=True)
-    stem = f"events_{start.isoformat()}_to_{end.isoformat()}"
+    start, end = min(starts), max(ends)
     html_output = generate_html(all_events, start, end)
-    html_path = os.path.join("output", f"{stem}.html")
+    html_path = os.path.join("output", f"events_{today.isoformat()}.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_output)
     print(f"HTML written to {html_path} ({len(html_output) / 1024:.1f} KB)")
+    if final_output:
+        os.makedirs(os.path.dirname(os.path.abspath(final_output)), exist_ok=True)
+        with open(final_output, "w", encoding="utf-8") as f:
+            f.write(html_output)
+        print(f"Also written to {final_output}")
 
 
 # ---------------------------------------------------------------------------
@@ -1152,21 +1761,35 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
 # ---------------------------------------------------------------------------
 
 SCRAPE_FNS = {
-    "dartmouth": run_scrape_dartmouth,
-    "nhhumanities": run_scrape_nhhumanities,
+    "dartmouth":           run_scrape_dartmouth,
+    "nhhumanities":        run_scrape_nhhumanities,
+    "northernstage":       run_scrape_northernstage,
+    "nlbarn":              run_scrape_nlbarn,
+    "shakerbridgetheatre": run_scrape_shakerbridgetheatre,
+    "nugget":              run_scrape_nugget,
+    "lebanon6":            run_scrape_lebanon6,
 }
 
 
 def parse_sources(value: str) -> list[str]:
-    if value.lower() == "all":
-        return list(ALL_SOURCES)
-    sources = [s.strip().lower() for s in value.split(",")]
-    invalid = [s for s in sources if s not in ALL_SOURCES]
-    if invalid:
-        raise argparse.ArgumentTypeError(
-            f"Unknown source(s): {', '.join(invalid)}. Valid: {', '.join(ALL_SOURCES)}, all"
-        )
-    return sources
+    result, seen = [], set()
+    for part in [s.strip().lower() for s in value.split(",")]:
+        if part in SOURCE_GROUPS:
+            for s in SOURCE_GROUPS[part]:
+                if s not in seen:
+                    result.append(s)
+                    seen.add(s)
+        elif part in set(ALL_SOURCES):
+            if part not in seen:
+                result.append(part)
+                seen.add(part)
+        else:
+            raise argparse.ArgumentTypeError(
+                f"Unknown source/group '{part}'. "
+                f"Sources: {', '.join(ALL_SOURCES)}. "
+                f"Groups: {', '.join(SOURCE_GROUPS)}"
+            )
+    return result
 
 
 def main():
@@ -1174,35 +1797,33 @@ def main():
         description="Upper Valley Events Scraper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-Sources: {', '.join(ALL_SOURCES)}, all
+Sources: {', '.join(ALL_SOURCES)}
+Groups:  all, theater, movies  (theater = {', '.join(THEATER_SOURCES)}; movies = {', '.join(MOVIE_SOURCES)})
 
 Examples:
-  python scraper.py --scrape=all --generate=all
-  python scraper.py --scrape=dartmouth
-  python scraper.py --generate=dartmouth,nhhumanities
-  python scraper.py --scrape=nhhumanities --generate=nhhumanities
+  python scraper.py                        # generate HTML from existing data files
+  python scraper.py --scrape=all           # scrape everything, then generate
+  python scraper.py --scrape=theater       # scrape theater sources only, then generate
+  python scraper.py --scrape=dartmouth     # scrape Dartmouth only, then generate
         """,
     )
     parser.add_argument("--scrape", type=parse_sources, metavar="SOURCES",
-                        help="Comma-separated sources to scrape (or 'all')")
-    parser.add_argument("--generate", type=parse_sources, metavar="SOURCES",
-                        help="Comma-separated sources to generate HTML from (or 'all')")
+                        help="Comma-separated sources/groups to scrape before generating")
+    parser.add_argument("--final_output", metavar="PATH",
+                        help="Also write generated HTML to this path (e.g. ../LocalWebHost/events.html)")
+    parser.add_argument("--days", type=int, default=30, metavar="N",
+                        help="Number of days in the date range (default: 30)")
     args = parser.parse_args()
 
-    if not args.scrape and not args.generate:
-        parser.print_help()
-        sys.exit(0)
-
     today = date.today()
-    end = today + timedelta(days=30)
+    end = today + timedelta(days=args.days)
 
     if args.scrape:
         for source in args.scrape:
             events = SCRAPE_FNS[source](today, end)
             save_scrape_results(source, events, today, end)
 
-    if args.generate:
-        run_generate(args.generate, today, end)
+    run_generate(ALL_SOURCES, today, end, final_output=args.final_output)
 
 
 if __name__ == "__main__":
