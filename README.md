@@ -49,7 +49,6 @@ Scrape only nhhumanities with a 60-day window, then regenerate all:
 ```
 python scraper.py --sources=nhhumanities --days=60
 ```
-```
 
 ## Intermediate files
 
