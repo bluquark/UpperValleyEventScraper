@@ -1,7 +1,7 @@
 # Upper Valley Events Scraper
 
-Scrapes upcoming events from multiple Upper Valley sources and produces
-a self-contained HTML page: `output/events_YYYY-MM-DD.html`.
+Scrapes upcoming public cultural events from several Upper Valley websites into one big
+page with Google Calendar buttons.
 
 **Sources:**
 - [home.dartmouth.edu/events](https://home.dartmouth.edu/events)
@@ -14,43 +14,20 @@ a self-contained HTML page: `output/events_YYYY-MM-DD.html`.
 
 ![Screenshot](example_screenshot.png)
 
-## Features
-
-- Events color-coded and filterable by source group (All / Dartmouth / NH Humanities / Theater / Movies)
-- Dartmouth: academic/non-public events collapsed by default; recurring events merged
-- NH Humanities: events more than ~30 min drive from Lebanon NH rendered collapsed and dimmed
-- Movies: per-day schedule table, YouTube trailer link, per-showing Google Calendar buttons
-- Per-event "Add to Google Calendar" button(s)
-- Dark/light theme toggle (persisted in `localStorage`)
-- URL hash tracks active filter and current scroll position — shareable and restored on reload
-
 ## Requirements
 
 ```
 pip install requests beautifulsoup4
 ```
 
-Python 3.9+ required (uses `zoneinfo`).
+Python 3.9+ required.
 
 ## Usage
 
-HTML is always generated. `--scrape` is optional — omitting it regenerates from existing data files without any network calls.
-
 ```
-python scraper.py [--scrape=SOURCES] [--days=N] [--final_output=PATH]
+python scraper.py [--scrape=SOURCES] [--days=N]
 ```
 
-### Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--scrape=SOURCES` | — | Fetch fresh data before generating (omit to use cached JSON) |
-| `--days=N` | `30` | Number of days in the date range |
-| `--final_output=PATH` | — | Also copy the generated HTML to this path |
-
-`SOURCES` is a comma-separated list of source names or a named group.
-
-| Name | Meaning |
 |---|---|
 | `all` | All sources |
 | `theater` | `northernstage`, `nlbarn`, `shakerbridgetheatre` |
@@ -69,14 +46,14 @@ Scrape everything and regenerate:
 python scraper.py --scrape=all
 ```
 
-Scrape only movies, then regenerate all:
+Scrape only movies with a 60-day window, then regenerate all:
 ```
-python scraper.py --scrape=movies
+python scraper.py --scrape=movies  --days=60
 ```
 
 60-day window, write output directly to a web root:
 ```
-python scraper.py --scrape=all --days=60 --final_output=../LocalWebHost/events.html
+python scraper.py --scrape=all
 ```
 
 ## Intermediate files
