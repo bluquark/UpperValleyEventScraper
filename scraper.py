@@ -10,6 +10,7 @@ Produces a self-contained HTML page with color-coded, filterable events.
 """
 
 import argparse
+import platform
 import html as html_mod
 import json
 import os
@@ -33,6 +34,13 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+_DAY_FMT = "%#d" if platform.system() == "Windows" else "%-d"
+
+
+def _strftime(fmt: str, d) -> str:
+    return d.strftime(fmt.replace("%-d", _DAY_FMT))
+
+
 DARTMOUTH_BASE = "https://home.dartmouth.edu"
 DARTMOUTH_AJAX_URL = f"{DARTMOUTH_BASE}/events/ajax/search"
 DARTMOUTH_DETAIL_URL = f"{DARTMOUTH_BASE}/events/event"
@@ -353,8 +361,8 @@ def parse_nhh_detail(html: str, event_date: date | None) -> dict:
 
 def _ns_fmt_date_range(start: date, end: date) -> str:
     if start.year == end.year:
-        return f"{start.strftime('%b %-d')} – {end.strftime('%b %-d, %Y')}"
-    return f"{start.strftime('%b %-d, %Y')} – {end.strftime('%b %-d, %Y')}"
+        return f"{_strftime('%b %-d', start)} – {_strftime('%b %-d, %Y', end)}"
+    return f"{_strftime('%b %-d, %Y', start)} – {_strftime('%b %-d, %Y', end)}"
 
 
 def _theater_show_to_event(show: dict, today: date) -> dict:
@@ -609,7 +617,7 @@ def _dedup_movies(events: list[dict]) -> list[dict]:
         primary["dates"] = [e["dates"][0] for e in group if e.get("dates")]
         # Build a per-day schedule block prepended to the description
         schedule_rows = "".join(
-            f"<tr><td><strong>{e['dates'][0].strftime('%a %b %-d')}</strong></td>"
+            f"<tr><td><strong>{_strftime('%a %b %-d', e['dates'][0])}</strong></td>"
             f"<td>{e.get('time_str', '')}</td></tr>"
             for e in group if e.get("dates") and e.get("time_str")
         )
@@ -811,10 +819,10 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
             by_date[first].append(ev)
 
     def fmt_date_header(d: date) -> str:
-        return d.strftime("%A, %B %-d, %Y")
+        return _strftime("%A, %B %-d, %Y", d)
 
     def fmt_date_short(d: date) -> str:
-        return d.strftime("%b %-d")
+        return _strftime("%b %-d", d)
 
     def render_event(ev: dict) -> str:
         source = ev.get("source", "dartmouth")
@@ -1222,7 +1230,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Upper Valley Events – {start.strftime("%b %-d")} to {end.strftime("%b %-d, %Y")}</title>
+  <title>Upper Valley Events – {_strftime("%b %-d", start)} to {_strftime("%b %-d, %Y", end)}</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%232d5a27'/><polygon points='16,3 28,22 4,22' fill='%231a3d16'/><polygon points='10,12 20,26 0,26' fill='%232d5a27'/><polygon points='22,14 30,26 14,26' fill='%23234820'/><rect x='14' y='22' width='4' height='6' fill='%235c3d1e'/></svg>">
   <style>{css}</style>
 </head>
@@ -1234,7 +1242,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
   <p class="subtitle">Scraped from {subtitle_parts}</p>
   <div class="stats">
     <span id="stats-counts"></span>
-    from <strong>{start.strftime("%B %-d")}</strong> to <strong>{end.strftime("%B %-d, %Y")}</strong>.
+    from <strong>{_strftime("%B %-d", start)}</strong> to <strong>{_strftime("%B %-d, %Y", end)}</strong>.
   </div>
   {filter_html}
   {body}
