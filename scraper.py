@@ -1072,7 +1072,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     }
 
     * { box-sizing: border-box; }
-    html, body { overflow-x: hidden; }
+    html, body { overflow-x: clip; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       max-width: 860px; margin: 0 auto; padding: 1rem 1.5rem 4rem;
