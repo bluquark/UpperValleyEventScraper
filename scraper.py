@@ -5,6 +5,7 @@ Fetches 30 days of events from:
   - home.dartmouth.edu/events
   - nhhumanities.org/programs/upcoming
   - avagallery.org (Neon CRM events portal)
+  - shakermuseum.org/events (The Events Calendar REST API)
   - northernstage.org
   - shakerbridgetheatre.org
 Produces a self-contained HTML page with color-coded, filterable events.
@@ -72,6 +73,11 @@ AVA_JWT_CLIENT_ID = "UmgTSDs1g1"
 AVA_EVENTS_API = "https://app.neononeevents.com/api/portal"
 AVA_PORTAL_URL = f"{AVA_CRM_BASE}/nx/portal/neonevents/events?path=%2Fportal%2Fevents"
 
+# Enfield Shaker Museum runs WordPress + The Events Calendar (Tribe), which
+# exposes a public REST API.
+SHAKERMUSEUM_BASE = "https://shakermuseum.org"
+SHAKERMUSEUM_API = f"{SHAKERMUSEUM_BASE}/wp-json/tribe/events/v1/events"
+
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -95,7 +101,7 @@ MONTH_MAP = {
 
 THEATER_SOURCES = ["northernstage", "shakerbridgetheatre"]
 MOVIE_SOURCES = ["nugget", "lebanon6"]
-ALL_SOURCES = ["dartmouth", "nhhumanities", "avagallery"] + THEATER_SOURCES + MOVIE_SOURCES
+ALL_SOURCES = ["dartmouth", "nhhumanities", "avagallery", "shakermuseum"] + THEATER_SOURCES + MOVIE_SOURCES
 SOURCE_GROUPS = {
     "all": ALL_SOURCES,
     "theater": THEATER_SOURCES,
@@ -514,9 +520,12 @@ def _ava_event_url(event_id: int) -> str:
     return f"{AVA_CRM_BASE}/nx/portal/neonevents/events?path=" + quote(f"/portal/events/{event_id}", safe="")
 
 
-def _ava_clean_description(desc: str) -> str:
-    # Descriptions come with hardcoded inline colors that clash with dark theme
-    desc = re.sub(r'\s*style="[^"]*"', '', desc)
+def _clean_description_html(desc: str) -> str:
+    # WPBakery shortcodes leak through Tribe's API: [vc_row][vc_column_text css=""]...
+    desc = re.sub(r'\[/?vc_[a-z_]+[^\]]*\]', '', desc)
+    # Source-site inline styles clash with the dark theme; their CSS classes
+    # (often pasted-in editor junk) are meaningless in our page
+    desc = re.sub(r'\s*(?:style|class|dir|data-[a-z-]+)="[^"]*"', '', desc)
     return desc.replace("&nbsp;", " ")
 
 
@@ -636,7 +645,7 @@ def run_scrape_avagallery(today: date, end: date) -> list[dict]:
         if city and city.lower() not in location.lower():
             location = f"{location}, {city}" if location else city
 
-        description = _ava_clean_description(det.get("description") or "")
+        description = _clean_description_html(det.get("description") or "")
         meta_parts = []
         if ranges:
             meta_parts.append(f"Sessions start {clock}")
@@ -664,6 +673,124 @@ def run_scrape_avagallery(today: date, end: date) -> list[dict]:
 
     print(f"AVA Gallery: {len(events)} events in window")
     return events
+
+
+# ---------------------------------------------------------------------------
+# Enfield Shaker Museum scraping (The Events Calendar REST API)
+# ---------------------------------------------------------------------------
+
+def _shaker_parse_local(s: str) -> datetime | None:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=EASTERN)
+    except (ValueError, TypeError):
+        return None
+
+
+def _shaker_cost_str(cost: str) -> str:
+    cost = html_mod.unescape(cost or "").strip()
+    return re.sub(r'(\$\d+)\.00\b', r'\1', cost)
+
+
+def run_scrape_shakermuseum(today: date, end: date) -> list[dict]:
+    print("Fetching Enfield Shaker Museum events...")
+    raw = []
+    page = 1
+    while True:
+        try:
+            resp = requests.get(SHAKERMUSEUM_API,
+                                params={"per_page": 50, "page": page,
+                                        "start_date": today.isoformat(),
+                                        "end_date": end.isoformat()},
+                                headers=BROWSER_HEADERS, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"Warning: Shaker Museum API page {page}: {e}", file=sys.stderr)
+            break
+        raw.extend(data.get("events", []))
+        if page >= data.get("total_pages", 1):
+            break
+        page += 1
+
+    events = []
+    for ev in raw:
+        if ev.get("hide_from_listings") or ev.get("status") not in (None, "publish"):
+            continue
+        start_local = _shaker_parse_local(ev.get("start_date", ""))
+        end_local = _shaker_parse_local(ev.get("end_date", ""))
+        if not start_local:
+            continue
+        start_d = start_local.date()
+        end_d = end_local.date() if end_local else start_d
+        if end_d < today or start_d > end:
+            continue
+
+        if end_d > start_d:
+            # Multi-day workshop: render as a date range like theater runs
+            first_day = max(start_d, today)
+            start_dt = None
+            time_str = _ns_fmt_date_range(start_d, end_d)
+            duration = f"{(end_d - start_d).days + 1} days"
+        else:
+            first_day = start_d
+            if ev.get("all_day"):
+                start_dt = None
+                time_str = "All day"
+                duration = ""
+            else:
+                start_dt = start_local.astimezone(timezone.utc)
+                time_str = start_local.strftime("%I:%M %p").lstrip("0").lower()
+                duration = ""
+                if end_local:
+                    hours = (end_local - start_local).total_seconds() / 3600
+                    if 0 < hours < 20:
+                        duration = f"{hours:.2f} hours"
+
+        venue = ev.get("venue") or {}
+        if isinstance(venue, list):
+            venue = venue[0] if venue else {}
+        location = venue.get("venue", "")
+        city = venue.get("city", "")
+        if city and city.lower() not in location.lower():
+            location = f"{location}, {city}" if location else city
+
+        description = _clean_description_html(ev.get("description") or "")
+        cost = _shaker_cost_str(ev.get("cost", ""))
+        if cost:
+            description = f"<p class='ev-movie-meta'>{cost}</p>\n" + description
+
+        image = ev.get("image")
+        image_url = image.get("url", "") if isinstance(image, dict) else ""
+
+        events.append({
+            "id": f"shakermuseum_{ev.get('id')}",
+            "title": html_mod.unescape(ev.get("title") or "Untitled"),
+            "source": "shakermuseum",
+            "date": first_day,
+            "dates": [first_day],
+            "time_str": time_str,
+            "location": location,
+            "description": description,
+            "image": image_url,
+            "url": ev.get("url", ""),
+            "start_dt": start_dt,
+            "duration": duration,
+            "unimportant": False,
+        })
+
+    # Merge recurring entries on exact title (canonical_title would strip
+    # performer names like "Free Outdoor Concert – Beecharmer")
+    groups: dict[tuple, list] = defaultdict(list)
+    for ev in events:
+        groups[(ev["title"], ev["time_str"], ev["location"])].append(ev)
+    merged = []
+    for group in groups.values():
+        group.sort(key=lambda e: e["date"])
+        primary = group[0]
+        primary["dates"] = [e["date"] for e in group]
+        merged.append(primary)
+    print(f"Shaker Museum: {len(merged)} events in window")
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -993,6 +1120,7 @@ SOURCE_META = {
     "dartmouth":          {"label": "Dartmouth",       "group": "dartmouth"},
     "nhhumanities":       {"label": "NH Humanities",   "group": "nhhumanities"},
     "avagallery":         {"label": "AVA Gallery",     "group": "avagallery"},
+    "shakermuseum":       {"label": "Shaker Museum",   "group": "shakermuseum"},
     "northernstage":      {"label": "Northern Stage",  "group": "theater"},
     "shakerbridgetheatre":{"label": "Shaker Bridge",   "group": "theater"},
     "nugget":             {"label": "Nugget Theater",   "group": "movies"},
@@ -1150,6 +1278,9 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     if "avagallery" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="avagallery" onclick="filterEvents(\'avagallery\', this)">AVA Gallery</button>')
+    if "shakermuseum" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="shakermuseum" onclick="filterEvents(\'shakermuseum\', this)">Shaker Museum</button>')
     if "theater" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="theater" onclick="filterEvents(\'theater\', this)">Theater</button>')
@@ -1211,6 +1342,8 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-nhhumanities:        #38bdf8;
       --surf-avagallery:         #06201d; --bord-avagallery:         #12403a;
       --pip-avagallery:          #2dd4bf;
+      --surf-shakermuseum:       #250a18; --bord-shakermuseum:       #46142e;
+      --pip-shakermuseum:        #f472b6;
       --surf-northernstage:      #1f1700; --bord-northernstage:      #3d2e00;
       --pip-northernstage:       #fbbf24;
       --surf-shakerbridgetheatre:#200a00; --bord-shakerbridgetheatre:#3d1500;
@@ -1260,6 +1393,8 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-nhhumanities:        #0284c7;
       --surf-avagallery:         #f0fdfa; --bord-avagallery:         #99f6e4;
       --pip-avagallery:          #0d9488;
+      --surf-shakermuseum:       #fdf2f8; --bord-shakermuseum:       #fbcfe8;
+      --pip-shakermuseum:        #db2777;
       --surf-northernstage:      #fffbeb; --bord-northernstage:      #fde68a;
       --pip-northernstage:       #d97706;
       --surf-shakerbridgetheatre:#fff5f5; --bord-shakerbridgetheatre:#fecaca;
@@ -1312,6 +1447,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     details.source-dartmouth           { background: var(--surf-dartmouth);           border-color: var(--bord-dartmouth); }
     details.source-nhhumanities        { background: var(--surf-nhhumanities);        border-color: var(--bord-nhhumanities); }
     details.source-avagallery          { background: var(--surf-avagallery);          border-color: var(--bord-avagallery); }
+    details.source-shakermuseum        { background: var(--surf-shakermuseum);        border-color: var(--bord-shakermuseum); }
     details.source-northernstage       { background: var(--surf-northernstage);       border-color: var(--bord-northernstage); }
     details.source-shakerbridgetheatre { background: var(--surf-shakerbridgetheatre); border-color: var(--bord-shakerbridgetheatre); }
     details.source-nugget              { background: var(--surf-nugget);              border-color: var(--bord-nugget); }
@@ -1338,6 +1474,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     .source-pip-dartmouth           { background: var(--pip-dartmouth); }
     .source-pip-nhhumanities        { background: var(--pip-nhhumanities); }
     .source-pip-avagallery          { background: var(--pip-avagallery); }
+    .source-pip-shakermuseum        { background: var(--pip-shakermuseum); }
     .source-pip-northernstage       { background: var(--pip-northernstage); }
     .source-pip-shakerbridgetheatre { background: var(--pip-shakerbridgetheatre); }
     .source-pip-nugget              { background: var(--pip-nugget); }
@@ -1367,6 +1504,8 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     }
     .ev-description { font-size: 0.88rem; color: var(--text-desc); margin-bottom: 0.75rem; clear: both; }
     .ev-description p { margin: 0.4rem 0; }
+    .ev-description h1, .ev-description h2, .ev-description h3,
+    .ev-description h4 { font-size: 1rem; margin: 0.6rem 0 0.3rem; }
     .ev-description a { color: var(--green); }
     .ev-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
     .chip { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 12px; max-width: min(100%, 28ch); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1417,6 +1556,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
         "dartmouth":           '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
         "nhhumanities":        '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
         "avagallery":          f'<a href="{AVA_PORTAL_URL}">avagallery.org</a>',
+        "shakermuseum":        '<a href="https://shakermuseum.org/events/">shakermuseum.org</a>',
         "northernstage":       '<a href="https://northernstage.org">northernstage.org</a>',
         "shakerbridgetheatre": '<a href="https://www.shakerbridgetheatre.org">shakerbridgetheatre.org</a>',
         "nugget":              '<a href="https://www.nugget-theaters.com">nugget-theaters.com</a>',
@@ -1857,6 +1997,7 @@ SCRAPE_FNS = {
     "dartmouth":           run_scrape_dartmouth,
     "nhhumanities":        run_scrape_nhhumanities,
     "avagallery":          run_scrape_avagallery,
+    "shakermuseum":        run_scrape_shakermuseum,
     "northernstage":       run_scrape_northernstage,
     "shakerbridgetheatre": run_scrape_shakerbridgetheatre,
     "nugget":              run_scrape_nugget,
