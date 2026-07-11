@@ -25,7 +25,7 @@ python scraper.py [--sources=SOURCES] [--days=N]
 - `all` — all sources
 - `theater` — `northernstage`, `shakerbridgetheatre`
 - `movies` — `nugget`, `lebanon6`
-- individual: `dartmouth`, `nhhumanities`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6`
+- individual: `dartmouth`, `nhhumanities`, `avagallery`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6`
 
 ### Examples
 

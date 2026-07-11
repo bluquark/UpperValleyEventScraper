@@ -4,6 +4,7 @@ Upper Valley Events Scraper
 Fetches 30 days of events from:
   - home.dartmouth.edu/events
   - nhhumanities.org/programs/upcoming
+  - avagallery.org (Neon CRM events portal)
   - northernstage.org
   - shakerbridgetheatre.org
 Produces a self-contained HTML page with color-coded, filterable events.
@@ -20,7 +21,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlencode, quote_plus
+from urllib.parse import urlencode, quote, quote_plus
 
 try:
     from zoneinfo import ZoneInfo
@@ -64,6 +65,13 @@ NUGGET_TICKETS_URL = "http://28879.formovietickets.com:2235"
 LEBANON6_BASE = "https://www.entertainmentcinemas.com"
 LEBANON6_URL = f"{LEBANON6_BASE}/lebanon-6"
 
+# AVA Gallery uses a Neon CRM portal that embeds the shared Neon One Events app.
+# An anonymous JWT from the org's neoncrm domain tells the events API which org to serve.
+AVA_CRM_BASE = "https://avagallery.app.neoncrm.com"
+AVA_JWT_CLIENT_ID = "UmgTSDs1g1"
+AVA_EVENTS_API = "https://app.neononeevents.com/api/portal"
+AVA_PORTAL_URL = f"{AVA_CRM_BASE}/nx/portal/neonevents/events?path=%2Fportal%2Fevents"
+
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -87,7 +95,7 @@ MONTH_MAP = {
 
 THEATER_SOURCES = ["northernstage", "shakerbridgetheatre"]
 MOVIE_SOURCES = ["nugget", "lebanon6"]
-ALL_SOURCES = ["dartmouth", "nhhumanities"] + THEATER_SOURCES + MOVIE_SOURCES
+ALL_SOURCES = ["dartmouth", "nhhumanities", "avagallery"] + THEATER_SOURCES + MOVIE_SOURCES
 SOURCE_GROUPS = {
     "all": ALL_SOURCES,
     "theater": THEATER_SOURCES,
@@ -476,6 +484,189 @@ def _shbt_parse_ticketing_page(html: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# AVA Gallery scraping (Neon CRM / Neon One Events)
+# ---------------------------------------------------------------------------
+
+def _ava_get_token(session: requests.Session) -> str:
+    resp = session.get(
+        f"{AVA_CRM_BASE}/np/jwt/authorize.do",
+        params={"scope": "openid", "response_type": "code",
+                "client_id": AVA_JWT_CLIENT_ID, "redirect_uri": "", "state": ""},
+        headers=BROWSER_HEADERS, timeout=30)
+    resp.raise_for_status()
+    code = resp.json()["code"]
+    resp = session.get(f"{AVA_CRM_BASE}/np/jwt/token.do", params={"code": code},
+                       headers=BROWSER_HEADERS, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["id_token"]
+
+
+def _ava_parse_dt(s: str) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(re.sub(r'\.\d+', '', s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _ava_event_url(event_id: int) -> str:
+    return f"{AVA_CRM_BASE}/nx/portal/neonevents/events?path=" + quote(f"/portal/events/{event_id}", safe="")
+
+
+def _ava_clean_description(desc: str) -> str:
+    # Descriptions come with hardcoded inline colors that clash with dark theme
+    desc = re.sub(r'\s*style="[^"]*"', '', desc)
+    return desc.replace("&nbsp;", " ")
+
+
+def _ava_price_str(price_range: dict | None) -> str:
+    if not price_range:
+        return ""
+    try:
+        lo, hi = int(price_range.get("min") or 0), int(price_range.get("max") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if hi <= 0:
+        return "Free"
+
+    def fmt(cents: int) -> str:
+        return f"${cents // 100}" if cents % 100 == 0 else f"${cents / 100:.2f}"
+    return fmt(lo) if lo == hi else f"{fmt(lo)}–{fmt(hi)}"
+
+
+def run_scrape_avagallery(today: date, end: date) -> list[dict]:
+    print("Fetching AVA Gallery events (Neon CRM portal)...")
+    session = requests.Session()
+    try:
+        token = _ava_get_token(session)
+    except Exception as e:
+        print(f"Warning: AVA Gallery JWT auth failed: {e}", file=sys.stderr)
+        return []
+    api_headers = {**BROWSER_HEADERS, "Authorization": f"Bearer {token}",
+                   "Accept": "application/json"}
+
+    listing = []
+    page = 1
+    while True:
+        try:
+            resp = session.get(f"{AVA_EVENTS_API}/events",
+                               params={"pagination[pageSize]": 50, "pagination[page]": page},
+                               headers=api_headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"Warning: AVA Gallery listing page {page}: {e}", file=sys.stderr)
+            break
+        listing.extend(data.get("data", []))
+        if not data.get("next_page_url"):
+            break
+        page += 1
+    print(f"AVA Gallery: {len(listing)} events listed")
+
+    def fetch_ava_detail(event_id: int) -> tuple[int, dict | None]:
+        try:
+            time.sleep(0.05)
+            r = session.get(f"{AVA_EVENTS_API}/event/{event_id}",
+                            headers=api_headers, timeout=30)
+            if r.status_code == 200:
+                return event_id, r.json()
+        except Exception as e:
+            print(f"  Warning: AVA Gallery event {event_id}: {e}", file=sys.stderr)
+        return event_id, None
+
+    details: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for event_id, det in pool.map(fetch_ava_detail, [item["id"] for item in listing]):
+            if det:
+                details[event_id] = det
+
+    events = []
+    for item in listing:
+        det = details.get(item["id"])
+        if not det:
+            continue
+        # Single-evening sessions come as one occurrence per date; multi-week
+        # classes come as one occurrence spanning first session to last.
+        occurrences = []
+        ranges = []
+        for occ in det.get("occurrences") or []:
+            start_dt = _ava_parse_dt(occ.get("start_datetime", ""))
+            if not start_dt:
+                continue
+            end_dt = _ava_parse_dt(occ.get("end_datetime", ""))
+            start_local = start_dt.astimezone(EASTERN).date()
+            end_local = end_dt.astimezone(EASTERN).date() if end_dt else start_local
+            if end_local > start_local:
+                if end_local >= today and start_local <= end:
+                    ranges.append((start_local, end_local, start_dt))
+            elif today <= start_local <= end:
+                occurrences.append((start_local, start_dt, end_dt))
+
+        if ranges:
+            # Date-range class: render like a theater run (range shown in the
+            # time slot, all-day GCal entry), since per-session dates are unknown.
+            range_start = min(r[0] for r in ranges)
+            range_end = max(r[1] for r in ranges)
+            first_day = max(range_start, today)
+            first_start = None
+            run_days = (range_end - range_start).days + 1
+            duration = f"{run_days} days"
+            time_str = _ns_fmt_date_range(range_start, range_end)
+            clock = ranges[0][2].astimezone(EASTERN).strftime("%I:%M %p").lstrip("0").lower()
+            occurrence_days = [first_day]
+        elif occurrences:
+            occurrences.sort()
+            first_day, first_start, first_end = occurrences[0]
+            local_start = first_start.astimezone(EASTERN)
+            time_str = clock = local_start.strftime("%I:%M %p").lstrip("0").lower()
+            duration = ""
+            if first_end:
+                hours = (first_end - first_start).total_seconds() / 3600
+                if 0 < hours < 20:
+                    duration = f"{hours:.2f} hours"
+            occurrence_days = [d for d, _, _ in occurrences]
+        else:
+            continue
+
+        loc = det.get("location") or item.get("location") or {}
+        location = loc.get("name", "")
+        addr = loc.get("address") or {}
+        city = addr.get("city", "")
+        if city and city.lower() not in location.lower():
+            location = f"{location}, {city}" if location else city
+
+        description = _ava_clean_description(det.get("description") or "")
+        meta_parts = []
+        if ranges:
+            meta_parts.append(f"Sessions start {clock}")
+        price = _ava_price_str(det.get("public_price_range"))
+        if price:
+            meta_parts.append(price)
+        if meta_parts:
+            description = f"<p class='ev-movie-meta'>{'  ·  '.join(meta_parts)}</p>\n" + description
+
+        events.append({
+            "id": f"avagallery_{item['id']}",
+            "title": det.get("name") or item.get("name") or "Untitled",
+            "source": "avagallery",
+            "date": first_day,
+            "dates": occurrence_days,
+            "time_str": time_str,
+            "location": location,
+            "description": description,
+            "image": det.get("image") or item.get("image") or "",
+            "url": _ava_event_url(item["id"]),
+            "start_dt": first_start,
+            "duration": duration,
+            "unimportant": False,
+        })
+
+    print(f"AVA Gallery: {len(events)} events in window")
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Movie scraping — Nugget Theaters & Lebanon 6
 # ---------------------------------------------------------------------------
 
@@ -801,6 +992,7 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
 SOURCE_META = {
     "dartmouth":          {"label": "Dartmouth",       "group": "dartmouth"},
     "nhhumanities":       {"label": "NH Humanities",   "group": "nhhumanities"},
+    "avagallery":         {"label": "AVA Gallery",     "group": "avagallery"},
     "northernstage":      {"label": "Northern Stage",  "group": "theater"},
     "shakerbridgetheatre":{"label": "Shaker Bridge",   "group": "theater"},
     "nugget":             {"label": "Nugget Theater",   "group": "movies"},
@@ -955,6 +1147,9 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     if "nhhumanities" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="nhhumanities" onclick="filterEvents(\'nhhumanities\', this)">NH Humanities</button>')
+    if "avagallery" in groups_present:
+        filter_btns.append(
+            '<button class="filter-btn" data-group="avagallery" onclick="filterEvents(\'avagallery\', this)">AVA Gallery</button>')
     if "theater" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="theater" onclick="filterEvents(\'theater\', this)">Theater</button>')
@@ -1014,6 +1209,8 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-dartmouth:           #4ade80;
       --surf-nhhumanities:       #131f2e; --bord-nhhumanities:       #1a3048;
       --pip-nhhumanities:        #38bdf8;
+      --surf-avagallery:         #06201d; --bord-avagallery:         #12403a;
+      --pip-avagallery:          #2dd4bf;
       --surf-northernstage:      #1f1700; --bord-northernstage:      #3d2e00;
       --pip-northernstage:       #fbbf24;
       --surf-shakerbridgetheatre:#200a00; --bord-shakerbridgetheatre:#3d1500;
@@ -1061,6 +1258,8 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --pip-dartmouth:           #00693e;
       --surf-nhhumanities:       #f0f8ff; --bord-nhhumanities:       #bfdbfe;
       --pip-nhhumanities:        #0284c7;
+      --surf-avagallery:         #f0fdfa; --bord-avagallery:         #99f6e4;
+      --pip-avagallery:          #0d9488;
       --surf-northernstage:      #fffbeb; --bord-northernstage:      #fde68a;
       --pip-northernstage:       #d97706;
       --surf-shakerbridgetheatre:#fff5f5; --bord-shakerbridgetheatre:#fecaca;
@@ -1112,6 +1311,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     details.event[open] { box-shadow: 0 2px 8px var(--shadow); }
     details.source-dartmouth           { background: var(--surf-dartmouth);           border-color: var(--bord-dartmouth); }
     details.source-nhhumanities        { background: var(--surf-nhhumanities);        border-color: var(--bord-nhhumanities); }
+    details.source-avagallery          { background: var(--surf-avagallery);          border-color: var(--bord-avagallery); }
     details.source-northernstage       { background: var(--surf-northernstage);       border-color: var(--bord-northernstage); }
     details.source-shakerbridgetheatre { background: var(--surf-shakerbridgetheatre); border-color: var(--bord-shakerbridgetheatre); }
     details.source-nugget              { background: var(--surf-nugget);              border-color: var(--bord-nugget); }
@@ -1137,6 +1337,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     }
     .source-pip-dartmouth           { background: var(--pip-dartmouth); }
     .source-pip-nhhumanities        { background: var(--pip-nhhumanities); }
+    .source-pip-avagallery          { background: var(--pip-avagallery); }
     .source-pip-northernstage       { background: var(--pip-northernstage); }
     .source-pip-shakerbridgetheatre { background: var(--pip-shakerbridgetheatre); }
     .source-pip-nugget              { background: var(--pip-nugget); }
@@ -1215,6 +1416,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     source_links = {
         "dartmouth":           '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
         "nhhumanities":        '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
+        "avagallery":          f'<a href="{AVA_PORTAL_URL}">avagallery.org</a>',
         "northernstage":       '<a href="https://northernstage.org">northernstage.org</a>',
         "shakerbridgetheatre": '<a href="https://www.shakerbridgetheatre.org">shakerbridgetheatre.org</a>',
         "nugget":              '<a href="https://www.nugget-theaters.com">nugget-theaters.com</a>',
@@ -1654,6 +1856,7 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
 SCRAPE_FNS = {
     "dartmouth":           run_scrape_dartmouth,
     "nhhumanities":        run_scrape_nhhumanities,
+    "avagallery":          run_scrape_avagallery,
     "northernstage":       run_scrape_northernstage,
     "shakerbridgetheatre": run_scrape_shakerbridgetheatre,
     "nugget":              run_scrape_nugget,
