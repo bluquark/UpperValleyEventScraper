@@ -9,3 +9,7 @@ $env:PYTHONUTF8 = "1"
 "" | Add-Content $LogFile -Encoding UTF8
 "=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Add-Content $LogFile -Encoding UTF8
 python scraper.py --sources=all 2>&1 | Add-Content $LogFile -Encoding UTF8
+$code = $LASTEXITCODE   # exit code of python (Add-Content is a cmdlet, doesn't change it)
+
+"=== exit code: $code ===" | Add-Content $LogFile -Encoding UTF8
+exit $code              # propagate to the scheduled task's LastTaskResult
