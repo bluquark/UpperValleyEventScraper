@@ -3,7 +3,6 @@
 Upper Valley Events Scraper
 Fetches 30 days of events from:
   - home.dartmouth.edu/events
-  - nhhumanities.org/programs/upcoming
   - avagallery.org (Neon CRM events portal)
   - shakermuseum.org/events (The Events Calendar REST API)
   - northernstage.org
@@ -47,9 +46,6 @@ DARTMOUTH_BASE = "https://home.dartmouth.edu"
 DARTMOUTH_AJAX_URL = f"{DARTMOUTH_BASE}/events/ajax/search"
 DARTMOUTH_DETAIL_URL = f"{DARTMOUTH_BASE}/events/event"
 
-NHH_BASE = "https://www.nhhumanities.org"
-NHH_LIST_URL = f"{NHH_BASE}/programs/upcoming"
-
 NORTHERNSTAGE_TICKET_SITE = "https://northernstage.my.salesforce-sites.com/ticket"
 NORTHERNSTAGE_APEXREMOTE = f"{NORTHERNSTAGE_TICKET_SITE}/apexremote"
 NS_SKIP_NAMES = re.compile(
@@ -86,14 +82,6 @@ BROWSER_HEADERS = {
 
 UNIMPORTANT_KEYWORDS = re.compile(r'\b(seminar|colloquium|thesis|dissertation)\b', re.IGNORECASE)
 
-# Towns within ~30 minutes drive of Lebanon NH (used to flag far-away NH Humanities events)
-NHH_NEARBY_TOWNS = {
-    "Lebanon", "West Lebanon", "Hanover", "Enfield", "Canaan", "Lyme",
-    "Plainfield", "Meriden", "Cornish", "Grantham", "Orford",
-    "White River Junction", "Hartford", "Wilder", "Norwich", "Thetford",
-    "Sharon", "Quechee", "Hartland", "Windsor", "Claremont",
-}
-
 MONTH_MAP = {
     'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
     'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
@@ -101,7 +89,7 @@ MONTH_MAP = {
 
 THEATER_SOURCES = ["northernstage", "shakerbridgetheatre"]
 MOVIE_SOURCES = ["nugget", "lebanon6"]
-ALL_SOURCES = ["dartmouth", "nhhumanities", "avagallery", "shakermuseum"] + THEATER_SOURCES + MOVIE_SOURCES
+ALL_SOURCES = ["dartmouth", "avagallery", "shakermuseum"] + THEATER_SOURCES + MOVIE_SOURCES
 SOURCE_GROUPS = {
     "all": ALL_SOURCES,
     "theater": THEATER_SOURCES,
@@ -220,152 +208,6 @@ def parse_detail(html: str) -> dict:
         "url": ld.get("url", ""),
         "time_str": time_str,
         "contact": contact,
-    }
-
-
-# ---------------------------------------------------------------------------
-# NH Humanities scraping
-# ---------------------------------------------------------------------------
-
-def _nhh_parse_page(soup: BeautifulSoup) -> list[dict]:
-    events = []
-    for ev_div in soup.find_all("div", class_="event"):
-        title_link = ev_div.find("a", class_="title")
-        if not title_link:
-            continue
-        title = title_link.get_text(strip=True)
-        href = title_link.get("href", "")
-        url = (NHH_BASE + href) if href.startswith("/") else href
-        date_div = ev_div.find("div", class_="date")
-        date_text = location = ""
-        if date_div:
-            parts = [p.strip() for p in date_div.get_text("\n").split("\n") if p.strip()]
-            if parts:
-                date_text = parts[0]
-            if len(parts) >= 2:
-                location = parts[1]
-        img_el = ev_div.find("img", class_="thumb")
-        image = img_el.get("src", "") if img_el else ""
-        if image and image.startswith("/"):
-            image = NHH_BASE + image
-        virtual_el = ev_div.find("div", class_="virtual")
-        virtual = virtual_el.get_text(strip=True) if virtual_el else ""
-        ev_date = None
-        if date_text:
-            try:
-                ev_date = datetime.strptime(date_text, "%A, %B %d, %Y").date()
-            except ValueError:
-                pass
-        events.append({
-            "id": url, "title": title, "url": url, "date": ev_date,
-            "location": location, "image": image, "virtual": virtual,
-            "source": "nhhumanities",
-        })
-    return events
-
-
-def fetch_nhh_event_list(end: date) -> list[dict]:
-    print("Fetching NH Humanities event list...")
-    all_events: list[dict] = []
-    seen_urls: set[str] = set()
-    page = 0
-    while True:
-        url = NHH_LIST_URL if page == 0 else f"{NHH_LIST_URL}?page={page}"
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        page_events = _nhh_parse_page(soup)
-        new_events = [e for e in page_events if e["url"] not in seen_urls]
-        if not new_events:
-            break
-        for e in new_events:
-            seen_urls.add(e["url"])
-        all_events.extend(new_events)
-        # Stop if all events on this page are past our end date
-        dated = [e["date"] for e in new_events if e.get("date")]
-        if dated and min(dated) > end:
-            break
-        page += 1
-    return all_events
-
-
-def fetch_nhh_detail(url: str) -> tuple[str, str | None]:
-    try:
-        time.sleep(0.05)
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
-        if resp.status_code == 200:
-            return url, resp.text
-    except Exception as e:
-        print(f"  Warning: failed to fetch {url}: {e}", file=sys.stderr)
-    return url, None
-
-
-def parse_nhh_detail(html: str, event_date: date | None) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-    h1 = soup.find("h1")
-    title = h1.get_text(strip=True) if h1 else ""
-    cat_el = soup.find("div", class_="eventCategory")
-    category = cat_el.get_text(strip=True) if cat_el else ""
-    presenter = ""
-    for p in soup.find_all("p"):
-        txt = p.get_text()
-        if "Presenter:" in txt:
-            a = p.find("a")
-            presenter = a.get_text(strip=True) if a else re.sub(r'Presenter:\s*', '', txt).strip()
-            break
-    desc_el = soup.find("div", class_="eventDescription")
-    description = ""
-    if desc_el:
-        for a in desc_el.find_all("a", href=True):
-            if a["href"].startswith("/"):
-                a["href"] = NHH_BASE + a["href"]
-        description = str(desc_el.decode_contents())
-    time_str = when_full = address = hosted_by = contact = ""
-    details_el = soup.find("div", class_="eventDetails")
-    if details_el:
-        for mb in details_el.find_all("div", class_="mb25"):
-            strong = mb.find("strong")
-            if not strong:
-                continue
-            label = strong.get_text(strip=True).rstrip(":")
-            paras = mb.find_all("p")
-            if len(paras) < 2:
-                continue
-            val = paras[1].get_text(strip=True)
-            if label == "When":
-                when_full = val
-            elif label == "Where":
-                address = paras[1].get_text("\n", strip=True)
-            elif label == "Hosted By":
-                hosted_by = val
-            elif label == "Contact Info":
-                contact = paras[1].get_text(", ", strip=True)
-    start_dt_utc = None
-    if when_full:
-        m = re.search(r'(\d{1,2}:\d{2}\s*[ap]m)', when_full, re.IGNORECASE)
-        if m:
-            time_str = m.group(1).strip()
-            try:
-                d = event_date or datetime.strptime(
-                    when_full.split(time_str)[0].strip(), "%A, %B %d, %Y").date()
-                tm = re.match(r'(\d{1,2}):(\d{2})\s*([ap]m)', time_str, re.IGNORECASE)
-                if tm:
-                    h, mn = int(tm.group(1)), int(tm.group(2))
-                    if tm.group(3).lower() == "pm" and h != 12:
-                        h += 12
-                    if tm.group(3).lower() == "am" and h == 12:
-                        h = 0
-                    dt_local = datetime(d.year, d.month, d.day, h, mn, tzinfo=EASTERN)
-                    start_dt_utc = dt_local.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                pass
-    og_img = soup.find("meta", property="og:image")
-    image = og_img.get("content", "") if og_img else ""
-    return {
-        "title": title, "category": category, "presenter": presenter,
-        "description": description, "time_str": time_str, "address": address,
-        "hosted_by": hosted_by, "contact": contact, "image": image,
-        "start_dt": start_dt_utc,
     }
 
 
@@ -1111,7 +953,6 @@ def gcal_url(ev: dict, occurrence_date: date) -> str:
 
 SOURCE_META = {
     "dartmouth":          {"label": "Dartmouth",       "group": "dartmouth"},
-    "nhhumanities":       {"label": "NH Humanities",   "group": "nhhumanities"},
     "avagallery":         {"label": "AVA Gallery",     "group": "avagallery"},
     "shakermuseum":       {"label": "Shaker Museum",   "group": "shakermuseum"},
     "northernstage":      {"label": "Northern Stage",  "group": "theater"},
@@ -1142,16 +983,9 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
         title = ev.get("title") or "Untitled"
         unimportant = ev.get("unimportant", False)
 
-        far_away = False
-        if source == "nhhumanities":
-            loc = ev.get("location", "") or ev.get("address", "") or ""
-            far_away = not any(town.lower() in loc.lower() for town in NHH_NEARBY_TOWNS)
-
-        open_attr = "" if (unimportant or far_away) else " open"
+        open_attr = "" if unimportant else " open"
         cls = f"event source-{source}"
         cls += " unimportant" if unimportant else " important"
-        if far_away:
-            cls += " far-away"
 
         time_display = format_time(ev.get("time_str", ""))
         location = ev.get("location", "") or ev.get("address", "")
@@ -1180,15 +1014,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
                 meta_parts.append(f'<span class="chip chip-audience">{audience}</span>')
             if ev.get("sponsor"):
                 meta_parts.append(f'<span class="chip chip-sponsor">{ev["sponsor"]}</span>')
-            if ev.get("contact"):
-                meta_parts.append(f'<span class="chip chip-contact">{ev["contact"]}</span>')
-        elif source == "nhhumanities":
-            if ev.get("category"):
-                meta_parts.append(f'<span class="chip chip-category">{ev["category"]}</span>')
-            if ev.get("presenter"):
-                meta_parts.append(f'<span class="chip chip-presenter">{ev["presenter"]}</span>')
-            if ev.get("hosted_by"):
-                meta_parts.append(f'<span class="chip chip-hostedby">{ev["hosted_by"]}</span>')
             if ev.get("contact"):
                 meta_parts.append(f'<span class="chip chip-contact">{ev["contact"]}</span>')
         meta_html = f'<div class="ev-meta">{"".join(meta_parts)}</div>' if meta_parts else ""
@@ -1265,9 +1090,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     if "dartmouth" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="dartmouth" onclick="filterEvents(\'dartmouth\', this)">Dartmouth</button>')
-    if "nhhumanities" in groups_present:
-        filter_btns.append(
-            '<button class="filter-btn" data-group="nhhumanities" onclick="filterEvents(\'nhhumanities\', this)">NH Humanities</button>')
     if "avagallery" in groups_present:
         filter_btns.append(
             '<button class="filter-btn" data-group="avagallery" onclick="filterEvents(\'avagallery\', this)">AVA Gallery</button>')
@@ -1317,8 +1139,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --chip-spo-bg:    #14401f; --chip-spo-fg: #86efac;
       --chip-con-bg:    #3a2200; --chip-con-fg: #fcd34d;
       --chip-cat-bg:    #1a2a40; --chip-cat-fg: #7dd3fc;
-      --chip-pre-bg:    #2a1a3a; --chip-pre-fg: #d8b4fe;
-      --chip-hby-bg:    #1a3a2a; --chip-hby-fg: #6ee7b7;
       --gcal-bg:        #2a4a8a;
       --gcal-hover:     #1e3a6e;
       --title-important:   #ffffff;
@@ -1331,8 +1151,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       /* Source surfaces */
       --surf-dartmouth:          #1e1e1e; --bord-dartmouth:          #333;
       --pip-dartmouth:           #4ade80;
-      --surf-nhhumanities:       #131f2e; --bord-nhhumanities:       #1a3048;
-      --pip-nhhumanities:        #38bdf8;
       --surf-avagallery:         #06201d; --bord-avagallery:         #12403a;
       --pip-avagallery:          #2dd4bf;
       --surf-shakermuseum:       #250a18; --bord-shakermuseum:       #46142e;
@@ -1369,8 +1187,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       --chip-spo-bg:    #dcfce7; --chip-spo-fg: #166534;
       --chip-con-bg:    #fef3c7; --chip-con-fg: #92400e;
       --chip-cat-bg:    #e0f2fe; --chip-cat-fg: #0369a1;
-      --chip-pre-bg:    #f3e8ff; --chip-pre-fg: #7e22ce;
-      --chip-hby-bg:    #d1fae5; --chip-hby-fg: #065f46;
       --gcal-bg:        #4285f4;
       --gcal-hover:     #3367d6;
       --title-important:   #111;
@@ -1382,8 +1198,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 
       --surf-dartmouth:          #fff;    --bord-dartmouth:          #ddd;
       --pip-dartmouth:           #00693e;
-      --surf-nhhumanities:       #f0f8ff; --bord-nhhumanities:       #bfdbfe;
-      --pip-nhhumanities:        #0284c7;
       --surf-avagallery:         #f0fdfa; --bord-avagallery:         #99f6e4;
       --pip-avagallery:          #0d9488;
       --surf-shakermuseum:       #fdf2f8; --bord-shakermuseum:       #fbcfe8;
@@ -1438,7 +1252,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     }
     details.event[open] { box-shadow: 0 2px 8px var(--shadow); }
     details.source-dartmouth           { background: var(--surf-dartmouth);           border-color: var(--bord-dartmouth); }
-    details.source-nhhumanities        { background: var(--surf-nhhumanities);        border-color: var(--bord-nhhumanities); }
     details.source-avagallery          { background: var(--surf-avagallery);          border-color: var(--bord-avagallery); }
     details.source-shakermuseum        { background: var(--surf-shakermuseum);        border-color: var(--bord-shakermuseum); }
     details.source-northernstage       { background: var(--surf-northernstage);       border-color: var(--bord-northernstage); }
@@ -1447,9 +1260,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     details.source-lebanon6            { background: var(--surf-lebanon6);            border-color: var(--bord-lebanon6); }
     details.event.unimportant { opacity: 0.85; }
     details.event.unimportant[open] { opacity: 1; }
-    details.event.far-away { opacity: 0.6; }
-    details.event.far-away[open] { opacity: 0.85; }
-    .far-away .ev-title { color: var(--title-unimportant); }
     summary {
       padding: 0.6rem 1rem; cursor: pointer; display: flex; align-items: baseline;
       gap: 0.6rem; flex-wrap: wrap; list-style: none; user-select: text;
@@ -1465,7 +1275,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
       flex-shrink: 0; align-self: center; display: inline-block;
     }
     .source-pip-dartmouth           { background: var(--pip-dartmouth); }
-    .source-pip-nhhumanities        { background: var(--pip-nhhumanities); }
     .source-pip-avagallery          { background: var(--pip-avagallery); }
     .source-pip-shakermuseum        { background: var(--pip-shakermuseum); }
     .source-pip-northernstage       { background: var(--pip-northernstage); }
@@ -1506,8 +1315,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     .chip-sponsor   { background: var(--chip-spo-bg); color: var(--chip-spo-fg); }
     .chip-contact   { background: var(--chip-con-bg); color: var(--chip-con-fg); }
     .chip-category  { background: var(--chip-cat-bg); color: var(--chip-cat-fg); }
-    .chip-presenter { background: var(--chip-pre-bg); color: var(--chip-pre-fg); }
-    .chip-hostedby  { background: var(--chip-hby-bg); color: var(--chip-hby-fg); }
     .ev-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.5rem; }
     .ev-link { font-size: 0.8rem; color: var(--green); text-decoration: none; font-weight: 500; }
     .ev-link:hover { text-decoration: underline; }
@@ -1547,7 +1354,6 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
 
     source_links = {
         "dartmouth":           '<a href="https://home.dartmouth.edu/events">home.dartmouth.edu/events</a>',
-        "nhhumanities":        '<a href="https://www.nhhumanities.org/programs/upcoming">nhhumanities.org</a>',
         "avagallery":          f'<a href="{AVA_PORTAL_URL}">avagallery.org</a>',
         "shakermuseum":        '<a href="https://shakermuseum.org/events/">shakermuseum.org</a>',
         "northernstage":       '<a href="https://northernstage.org">northernstage.org</a>',
@@ -1605,7 +1411,7 @@ def generate_html(events: list[dict], start: date, end: date) -> str:
     document.querySelectorAll('details.event').forEach(el => {{
       if (el.style.display === 'none') return;
       total++;
-      if (el.classList.contains('important') && !el.classList.contains('far-away')) open++;
+      if (el.classList.contains('important')) open++;
       else collapsed++;
     }});
     document.getElementById('stats-counts').innerHTML =
@@ -1822,47 +1628,6 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
     return merged_events
 
 
-def run_scrape_nhhumanities(today: date, end: date) -> list[dict]:
-    raw_events = fetch_nhh_event_list(end)
-    print(f"Found {len(raw_events)} NH Humanities events total")
-    raw_events = [e for e in raw_events if e.get("date") and today <= e["date"] <= end]
-    print(f"Filtered to {len(raw_events)} NH Humanities events in window")
-    print(f"Fetching details for {len(raw_events)} NH Humanities events...")
-    details: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(fetch_nhh_detail, ev["url"]): ev for ev in raw_events}
-        for future in as_completed(futures):
-            ev = futures[future]
-            url, detail_html = future.result()
-            if detail_html:
-                details[url] = parse_nhh_detail(detail_html, ev.get("date"))
-    print(f"Successfully fetched {len(details)} NH Humanities detail pages")
-    combined = []
-    for ev in raw_events:
-        det = details.get(ev["url"], {})
-        merged = {**ev}
-        if det:
-            merged.update({
-                "title":       det.get("title") or ev["title"],
-                "description": det.get("description", ""),
-                "time_str":    det.get("time_str", ""),
-                "start_dt":    det.get("start_dt"),
-                "presenter":   det.get("presenter", ""),
-                "hosted_by":   det.get("hosted_by", ""),
-                "contact":     det.get("contact", ""),
-                "category":    det.get("category", ""),
-            })
-            if det.get("address"):
-                merged["location"] = det["address"]
-            if det.get("image"):
-                merged["image"] = det["image"]
-        merged["dates"] = [ev["date"]] if ev.get("date") else []
-        merged["unimportant"] = False
-        combined.append(merged)
-    print(f"NH Humanities: {len(combined)} events")
-    return combined
-
-
 def _ns_absolutize(path: str) -> str:
     return NORTHERNSTAGE_TICKET_SITE + path if path.startswith("/") else path
 
@@ -1992,7 +1757,6 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
 
 SCRAPE_FNS = {
     "dartmouth":           run_scrape_dartmouth,
-    "nhhumanities":        run_scrape_nhhumanities,
     "avagallery":          run_scrape_avagallery,
     "shakermuseum":        run_scrape_shakermuseum,
     "northernstage":       run_scrape_northernstage,

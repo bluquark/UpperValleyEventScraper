@@ -25,7 +25,7 @@ python scraper.py [--sources=SOURCES] [--days=N]
 - `all` — all sources
 - `theater` — `northernstage`, `shakerbridgetheatre`
 - `movies` — `nugget`, `lebanon6`
-- individual: `dartmouth`, `nhhumanities`, `avagallery`, `shakermuseum`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6`
+- individual: `dartmouth`, `avagallery`, `shakermuseum`, `northernstage`, `shakerbridgetheatre`, `nugget`, `lebanon6`
 
 ### Examples
 
@@ -39,7 +39,7 @@ Scrape everything and regenerate:
 python scraper.py --sources=all
 ```
 
-Scrape only nhhumanities with a 60-day window, then regenerate all:
+Scrape only shakermuseum with a 60-day window, then regenerate all:
 ```
-python scraper.py --sources=nhhumanities --days=60
+python scraper.py --sources=shakermuseum --days=60
 ```
