@@ -494,14 +494,7 @@ def _shbt_parse_ticketing_page(html: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _ava_get_token(session: requests.Session) -> str:
-    resp = session.get(
-        f"{AVA_CRM_BASE}/np/jwt/authorize.do",
-        params={"scope": "openid", "response_type": "code",
-                "client_id": AVA_JWT_CLIENT_ID, "redirect_uri": "", "state": ""},
-        headers=BROWSER_HEADERS, timeout=30)
-    resp.raise_for_status()
-    code = resp.json()["code"]
-    resp = session.get(f"{AVA_CRM_BASE}/np/jwt/token.do", params={"code": code},
+    resp = session.get(f"{AVA_CRM_BASE}/jwt/token", params={"client_id": AVA_JWT_CLIENT_ID},
                        headers=BROWSER_HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.json()["id_token"]
@@ -1778,6 +1771,9 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
     list_html = fetch_event_list(today, end)
     raw_events = parse_event_list(list_html, today.year)
     print(f"Found {len(raw_events)} Dartmouth event entries in listing")
+    if not raw_events:
+        # An empty listing is an outage on their side; failing keeps the last good page up.
+        raise RuntimeError("Dartmouth listing is empty")
     seen_ids: dict[str, dict] = {}
     for ev in raw_events:
         if ev["id"] not in seen_ids:
@@ -1891,7 +1887,8 @@ def run_scrape_northernstage(today: date, end: date) -> list[dict]:
         payload = {
             "action": "PatronTicket.Controller_PublicTicketApp",
             "method": "fetchEvents",
-            "data": ["", "", ""],
+            # siteURL, accessCode, passcode, eventView
+            "data": ["", "", "", ""],
             "type": "rpc", "tid": 2,
             "ctx": {"csrf": csrf, "vid": vid, "ns": "PatronTicket", "ver": 51.0, "authorization": auth},
         }
