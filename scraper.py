@@ -251,27 +251,33 @@ def _theater_show_to_event(show: dict, today: date) -> dict:
 # ---------------------------------------------------------------------------
 
 _SHBT_FULL_DATE_RE = re.compile(
-    r'(\w+)\s+(\d{1,2})\s*[-\u2013\xa0]+\s*(?:(\w+)\s+)?(\d{1,2}),?\s+(\d{4})'
+    r'(\w+)\s+(\d{1,2})\s*[-\u2013\xa0]+\s*(?:(\w+)\s+)?(\d{1,2})(?:,?\s+(\d{4}))?'
 )
 
 
-def _shbt_parse_date_range(text: str) -> tuple[date, date] | None:
-    """Parse 'March 26 - April 12, 2026' or 'May 7 - 24, 2026'."""
+def _shbt_parse_date_range(text: str, today: date) -> tuple[date, date] | None:
+    """Parse 'March 26 - April 12, 2026', 'May 7 - 24, 2026' or, the year
+    left out, 'December 3 - 20': then the coming run, or the one still on."""
     text = text.replace('\xa0', ' ').strip()
     m = _SHBT_FULL_DATE_RE.match(text)
     if not m:
         return None
     start_month_s, start_day_s, end_month_s, end_day_s, year_s = m.groups()
     end_month_s = end_month_s or start_month_s
-    try:
-        start_d = datetime.strptime(f"{start_month_s} {start_day_s} {year_s}", '%B %d %Y').date()
-        end_d = datetime.strptime(f"{end_month_s} {end_day_s} {year_s}", '%B %d %Y').date()
-        return start_d, end_d
-    except ValueError:
-        return None
+    for year in [int(year_s)] if year_s else [today.year, today.year + 1]:
+        try:
+            start_d = datetime.strptime(f"{start_month_s} {start_day_s} {year}", '%B %d %Y').date()
+            end_d = datetime.strptime(f"{end_month_s} {end_day_s} {year}", '%B %d %Y').date()
+        except ValueError:
+            return None
+        if end_d < start_d:
+            end_d = end_d.replace(year=year + 1)
+        if year_s or end_d >= today:
+            return start_d, end_d
+    return None
 
 
-def _shbt_parse_ticketing_page(html: str) -> list[dict]:
+def _shbt_parse_ticketing_page(html: str, today: date) -> list[dict]:
     """Parse the arts-people ticketing page for Shaker Bridge Theatre."""
     soup = BeautifulSoup(html, "html.parser")
     shows = []
@@ -310,7 +316,7 @@ def _shbt_parse_ticketing_page(html: str) -> list[dict]:
             elif 'author' not in current and t.lower().startswith('by '):
                 current['author'] = t
             elif 'start_date' not in current:
-                dates = _shbt_parse_date_range(t)
+                dates = _shbt_parse_date_range(t, today)
                 if dates:
                     current['start_date'], current['end_date'] = dates
                     current['date_range_str'] = _ns_fmt_date_range(*dates)
@@ -388,7 +394,7 @@ def run_scrape_avagallery(today: date, end: date) -> list[dict]:
         token = _ava_get_token(session)
     except Exception as e:
         print(f"Warning: AVA Gallery JWT auth failed: {e}", file=sys.stderr)
-        return []
+        raise
     api_headers = {**BROWSER_HEADERS, "Authorization": f"Bearer {token}",
                    "Accept": "application/json"}
 
@@ -409,6 +415,8 @@ def run_scrape_avagallery(today: date, end: date) -> list[dict]:
             break
         page += 1
     print(f"AVA Gallery: {len(listing)} events listed")
+    if not listing:
+        raise RuntimeError("AVA Gallery listing is empty")
 
     def fetch_ava_detail(event_id: int) -> tuple[int, dict | None]:
         try:
@@ -548,6 +556,8 @@ def run_scrape_shakermuseum(today: date, end: date) -> list[dict]:
         if page >= data.get("total_pages", 1):
             break
         page += 1
+    if not raw:
+        raise RuntimeError("Shaker Museum listing is empty")
 
     events = []
     for ev in raw:
@@ -793,6 +803,8 @@ def run_scrape_nugget(today: date, end: date) -> list[dict]:
             events.extend(day_events)
     events = _dedup_movies(events)
     print(f"Nugget: {len(events)} films")
+    if not events:
+        raise RuntimeError("Nugget listing is empty")
     return events
 
 
@@ -816,6 +828,8 @@ def run_scrape_lebanon6(today: date, end: date) -> list[dict]:
         for day_events in pool.map(_lebanon6_fetch_day, days):
             events.extend(day_events)
     events = _dedup_movies(events)
+    if not events:
+        raise RuntimeError("Lebanon 6 listing is empty")
     print(f"Lebanon 6: fetching synopses for {len(events)} films...")
     urls = [ev.get("url", "") for ev in events]
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -1643,8 +1657,7 @@ def run_scrape_northernstage(today: date, end: date) -> list[dict]:
         html = resp.text
         m = re.search(r'\{"name":"fetchEvents"[^}]+\}', html)
         if not m:
-            print("Warning: Northern Stage - could not find fetchEvents config", file=sys.stderr)
-            return []
+            raise RuntimeError("could not find fetchEvents config")
         config = json.loads(m.group(0))
         csrf = config["csrf"]
         auth = config["authorization"]
@@ -1669,11 +1682,12 @@ def run_scrape_northernstage(today: date, end: date) -> list[dict]:
         data = remote_resp.json()
     except Exception as e:
         print(f"Warning: Northern Stage API error: {e}", file=sys.stderr)
-        return []
+        raise
 
     if not data or data[0].get("statusCode") != 200:
-        print(f"Warning: Northern Stage fetchEvents: {data[0].get('message', 'unknown error')}", file=sys.stderr)
-        return []
+        raise RuntimeError(f"Northern Stage fetchEvents: {data[0].get('message', 'unknown error') if data else 'no reply'}")
+    if not data[0]["result"]:
+        raise RuntimeError("Northern Stage listing is empty")
 
     events = []
     for ev in data[0]["result"]:
@@ -1714,10 +1728,12 @@ def run_scrape_shakerbridgetheatre(today: date, end: date) -> list[dict]:
     try:
         resp = requests.get(SHBT_TICKETS_URL, headers=BROWSER_HEADERS, timeout=30)
         resp.raise_for_status()
-        shows = _shbt_parse_ticketing_page(resp.text)
+        shows = _shbt_parse_ticketing_page(resp.text, today)
     except Exception as e:
         print(f"  Warning: could not fetch Shaker Bridge ticketing page: {e}", file=sys.stderr)
         shows = []
+    if not shows:
+        raise RuntimeError("Shaker Bridge listing is empty")
 
     events = []
     for show in shows:
