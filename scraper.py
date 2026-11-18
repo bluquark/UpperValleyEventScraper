@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
@@ -1578,7 +1579,7 @@ def run_scrape_dartmouth(today: date, end: date) -> list[dict]:
     raw_events = parse_event_list(list_html, today.year)
     print(f"Found {len(raw_events)} Dartmouth event entries in listing")
     if not raw_events:
-        # An empty listing is an outage on their side; failing keeps the last good page up.
+        # An empty listing is an outage on their side; failing keeps the last good data.
         raise RuntimeError("Dartmouth listing is empty")
     seen_ids: dict[str, dict] = {}
     for ev in raw_events:
@@ -1732,6 +1733,14 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
     starts, ends = [], []
     for source in sources:
         events, s, e = load_scrape_results(source)
+        if s < today:
+            # Left over from an earlier day (its scrape failed since): only what is still ahead.
+            events = [
+                {**ev, "dates": upcoming}
+                for ev in events
+                if (upcoming := [d for d in ev.get("dates") or [] if d >= today])
+            ]
+            s = today
         all_events.extend(events)
         starts.append(s)
         ends.append(e)
@@ -1754,6 +1763,10 @@ def run_generate(sources: list[str], today: date, end: date) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+# The page was generated, with the previous results of the sources whose scrape failed.
+EXIT_STALE = 3
+STALE_FILE = os.path.join("output", "stale_sources")
 
 SCRAPE_FNS = {
     "dartmouth":           run_scrape_dartmouth,
@@ -1811,12 +1824,24 @@ Examples:
     today = date.today()
     end = today + timedelta(days=args.days)
 
+    stale = []
     if args.sources:
         for source in args.sources:
-            events = SCRAPE_FNS[source](today, end)
+            try:
+                events = SCRAPE_FNS[source](today, end)
+            except Exception:
+                # The source's previous results stay in place and are generated from.
+                traceback.print_exc()
+                stale.append(source)
+                continue
             save_scrape_results(source, events, today, end)
 
     run_generate(ALL_SOURCES, today, end)
+    if stale:
+        print(f"Stale sources: {' '.join(stale)}", file=sys.stderr)
+        with open(STALE_FILE, "w", encoding="utf-8") as f:
+            f.write(" ".join(stale) + "\n")
+        sys.exit(EXIT_STALE)
 
 
 if __name__ == "__main__":
