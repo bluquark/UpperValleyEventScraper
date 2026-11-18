@@ -234,6 +234,7 @@ def _theater_show_to_event(show: dict, today: date) -> dict:
         # Sort by opening night (or today if already running)
         "date": max(start_date, today),
         "dates": [max(start_date, today)],
+        "end_date": end_date,
         "time_str": show["date_range_str"],
         "location": show.get("location", ""),
         "description": show.get("description", ""),
@@ -1728,18 +1729,23 @@ def run_scrape_shakerbridgetheatre(today: date, end: date) -> list[dict]:
     return events
 
 
+def _still_ahead(ev: dict, today: date) -> dict | None:
+    """An event of an earlier day's scrape as of today, None once it is over."""
+    upcoming = [d for d in ev.get("dates") or [] if d >= today]
+    # A run already on at its scrape carries that day alone.
+    if not upcoming and (ev.get("end_date") or date.min) >= today:
+        upcoming = [today]
+    return {**ev, "date": upcoming[0], "dates": upcoming} if upcoming else None
+
+
 def run_generate(sources: list[str], today: date, end: date) -> None:
     all_events = []
     starts, ends = [], []
     for source in sources:
         events, s, e = load_scrape_results(source)
         if s < today:
-            # Left over from an earlier day (its scrape failed since): only what is still ahead.
-            events = [
-                {**ev, "dates": upcoming}
-                for ev in events
-                if (upcoming := [d for d in ev.get("dates") or [] if d >= today])
-            ]
+            # Left over from an earlier day (its scrape failed since).
+            events = [ahead for ev in events if (ahead := _still_ahead(ev, today))]
             s = today
         all_events.extend(events)
         starts.append(s)
@@ -1833,6 +1839,8 @@ Examples:
                 # The source's previous results stay in place and are generated from.
                 traceback.print_exc()
                 stale.append(source)
+                if not os.path.exists(INTERMEDIATE_FILES[source]):
+                    save_scrape_results(source, [], today, end)
                 continue
             save_scrape_results(source, events, today, end)
 
